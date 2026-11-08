@@ -1,0 +1,11 @@
+/src/
+/override/
+/runtime/
+/prefix/
+/outputs/
+result
+result-*
+*.exe
+*.msi
+/.gcroots/
+/.cache/

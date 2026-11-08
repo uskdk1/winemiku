@@ -1,0 +1,57 @@
+diff --git a/programs/winemenubuilder/winemenubuilder.c b/programs/winemenubuilder/winemenubuilder.c
+index bed26d5..a15a06f 100644
+--- a/programs/winemenubuilder/winemenubuilder.c
++++ b/programs/winemenubuilder/winemenubuilder.c
+@@ -1243,6 +1243,29 @@ static LPSTR escape(LPCWSTR arg)
+     return utf8_string;
+ }
+ 
++/* command written to Exec= lines; WINEMENUBUILDER_LAUNCHER overrides the default "wine"
++ * (for setups where wine isn't in PATH or needs a wrapper) */
++static const char *wine_launcher(void)
++{
++    static char *cmd;
++    const WCHAR *launcher;
++
++    if (cmd) return cmd;
++    if ((launcher = _wgetenv( L"WINEMENUBUILDER_LAUNCHER" )) && *launcher)
++    {
++        char *path = wchars_to_utf8_chars( launcher );
++        cmd = xmalloc( strlen( path ) + 3 );
++        sprintf( cmd, "\"%s\"", path );
++        heap_free( path );
++    }
++    else
++    {
++        cmd = xmalloc( 5 );
++        strcpy( cmd, "wine" );
++    }
++    return cmd;
++}
++
+ static BOOL write_desktop_entry(const WCHAR *link, const WCHAR *location, const WCHAR *linkname,
+                                 const WCHAR *path, const WCHAR *args, const WCHAR *descr,
+                                 const WCHAR *workdir, const WCHAR *icon, const WCHAR *wmclass)
+@@ -1278,7 +1301,7 @@ static BOOL write_desktop_entry(const WCHAR *link, const WCHAR *location, const
+         fprintf(file, "env \"WINEPREFIX=%s\" ", path);
+         heap_free( path );
+     }
+-    fprintf(file, "wine \"%s\"", escape(path));
++    fprintf(file, "%s \"%s\"", wine_launcher(), escape(path));
+     if (args && *args) fprintf(file, " \"%s\"", escape(args) );
+     fputc( '\n', file );
+     fprintf(file, "Type=Application\n");
+@@ -2034,11 +2057,11 @@ static BOOL write_freedesktop_association_entry(const WCHAR *desktopPath, const
+         if (prefix)
+         {
+             char *path = wine_get_unix_file_name( prefix );
+-            fprintf(desktop, "Exec=env \"WINEPREFIX=%s\" wine start ", path);
++            fprintf(desktop, "Exec=env \"WINEPREFIX=%s\" %s start ", path, wine_launcher());
+             heap_free( path );
+         }
+         else
+-            fprintf(desktop, "Exec=wine start ");
++            fprintf(desktop, "Exec=%s start ", wine_launcher());
+         if (progId) /* file association */
+             fprintf(desktop, "/ProgIDOpen \"%s\" %%f\n", escape(progId));
+         else /* protocol association */

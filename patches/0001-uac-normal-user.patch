@@ -1,0 +1,106 @@
+Subject: [PATCH] 일반 실행(Limited 토큰)을 앱에 관리자가 아닌 것으로 보고
+
+Wine 은 일반 실행 프로세스에도 Administrators 그룹(enabled)과 High 무결성을
+보고해서, 관리자 여부를 검사하는 앱이 "관리자 권한으로 실행됨" 경고를 띄운다.
+
+- server: Limited 토큰의 TokenGroups 에서 Administrators 를 deny-only 로 보고
+  (접근 검사용 실제 그룹은 유지: 레지스트리 기본 ACL 이 Administrators 에게만 쓰기를 줌)
+- ntdll: TokenIntegrityLevel 을 Limited=Medium, 그 외 High 로 보고 (원래 항상 High)
+- shell32: IsUserAnAdmin 이 deny-only/비활성 그룹을 무시하도록 수정
+
+관리자 요청(runas, requireAdministrator manifest)은 기존처럼 Full 토큰으로 관리자.
+---
+
+diff --git a/dlls/ntdll/unix/security.c b/dlls/ntdll/unix/security.c
+index c49f15b..7e6083a 100644
+--- a/dlls/ntdll/unix/security.c
++++ b/dlls/ntdll/unix/security.c
+@@ -607,16 +607,23 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
+ 
+     case TokenIntegrityLevel:
+         {
+-            /* report always "S-1-16-12288" (high mandatory level) for now */
+-            static const SID high_level = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY},
+-                                                            {SECURITY_MANDATORY_HIGH_RID}};
+-
++            /* report medium for limited (non-elevated) tokens, high otherwise */
++            SID level = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY},
++                                          {SECURITY_MANDATORY_HIGH_RID}};
+             TOKEN_MANDATORY_LABEL *tml = info;
+             PSID psid = tml + 1;
+ 
++            SERVER_START_REQ( get_token_info )
++            {
++                req->handle = wine_server_obj_handle( token );
++                if (!wine_server_call( req ) && reply->elevation_type == TokenElevationTypeLimited)
++                    level.SubAuthority[0] = SECURITY_MANDATORY_MEDIUM_RID;
++            }
++            SERVER_END_REQ;
++
+             tml->Label.Sid = psid;
+             tml->Label.Attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
+-            memcpy( psid, &high_level, sizeof(SID) );
++            memcpy( psid, &level, sizeof(SID) );
+         }
+         break;
+ 
+diff --git a/dlls/shell32/shellord.c b/dlls/shell32/shellord.c
+index c94b259..40d831d 100644
+--- a/dlls/shell32/shellord.c
++++ b/dlls/shell32/shellord.c
+@@ -1309,7 +1309,10 @@ BOOL WINAPI IsUserAnAdmin(VOID)
+ 
+     for (i = 0; i < lpGroups->GroupCount; i++)
+     {
+-        if (EqualSid(lpSid, lpGroups->Groups[i].Sid))
++        /* deny-only (UAC filtered) groups don't count, as on Windows */
++        if ((lpGroups->Groups[i].Attributes & SE_GROUP_ENABLED) &&
++            !(lpGroups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
++            EqualSid(lpSid, lpGroups->Groups[i].Sid))
+         {
+             bResult = TRUE;
+             break;
+diff --git a/server/token.c b/server/token.c
+index fc0b7bf..f6e8d1c 100644
+--- a/server/token.c
++++ b/server/token.c
+@@ -1504,6 +1504,18 @@ DECL_HANDLER(get_token_sid)
+     }
+ }
+ 
++/* Group attributes as reported to applications.
++ * Wine doesn't filter limited (non-elevated) tokens for access checks, since default
++ * object ACLs (e.g. registry keys) only grant write access to Administrators. But
++ * report Administrators as deny-only like a Windows UAC filtered token, so that
++ * applications started normally don't think they are running as administrator. */
++static unsigned int reported_group_attrs( const struct token *token, const struct group *group )
++{
++    if (token->elevation == TokenElevationTypeLimited && equal_sid( &group->sid, &builtin_admins_sid ))
++        return SE_GROUP_USE_FOR_DENY_ONLY;
++    return group->attrs;
++}
++
+ /* retrieves the groups that the user represented by the token belongs to */
+ DECL_HANDLER(get_token_groups)
+ {
+@@ -1516,7 +1528,7 @@ DECL_HANDLER(get_token_groups)
+ 
+         LIST_FOR_EACH_ENTRY( group, &token->groups, const struct group, entry )
+         {
+-            if (req->attr_mask && !(group->attrs & req->attr_mask)) continue;
++            if (req->attr_mask && !(reported_group_attrs( token, group ) & req->attr_mask)) continue;
+             group_count++;
+             reply->sid_len += sid_len( &group->sid );
+         }
+@@ -1531,9 +1543,9 @@ DECL_HANDLER(get_token_groups)
+             {
+                 LIST_FOR_EACH_ENTRY( group, &token->groups, const struct group, entry )
+                 {
+-                    if (req->attr_mask && !(group->attrs & req->attr_mask)) continue;
++                    if (req->attr_mask && !(reported_group_attrs( token, group ) & req->attr_mask)) continue;
+                     sid = copy_sid( sid, &group->sid );
+-                    *attr_ptr++ = group->attrs;
++                    *attr_ptr++ = reported_group_attrs( token, group );
+                 }
+             }
+         }
