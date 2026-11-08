@@ -1,0 +1,29 @@
+{
+  // prefix/dosdevices/z: 가 / 를 가리키는 심볼릭 링크라서, 따라가면 디스크 전체를 검색한다
+  "search.followSymlinks": false,
+  "files.exclude": {
+    "prefix": true,
+    "runtime": true,
+    "override": true,
+    ".cache": true,
+    ".gcroots": true,
+    "result*": true
+  },
+  "search.exclude": {
+    "src": true,
+    "prefix": true,
+    "runtime": true,
+    "override": true,
+    ".cache": true,
+    ".gcroots": true,
+    "result*": true
+  },
+  "files.watcherExclude": {
+    "**/src/**": true,
+    "**/prefix/**": true,
+    "**/runtime/**": true,
+    "**/override/**": true,
+    "**/.cache/**": true,
+    "**/.gcroots/**": true
+  }
+}
