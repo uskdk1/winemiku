@@ -18,7 +18,7 @@ set -o pipefail
 # 경로 설정. 기본값은 저장소 안에서 쓰는 개발 모드이고, flake 패키지(nix run)는
 # 래퍼가 WINEMIKU_* 를 설정해서 패키지 안의 Wine 과 사용자 데이터 폴더를 쓰게 한다.
 #   WINEMIKU_WINE      Wine 루트 (bin/wine, bin/wineserver)         기본: <저장소>/runtime
-#   WINEMIKU_SHARE     prefix.reg, cjk-fonts/, dxvk/{x64,x32}/      기본: WINEMIKU_WINE
+#   WINEMIKU_SHARE     prefix.reg, cjk-fonts/, fonts/, dxvk/{x64,x32}/  기본: WINEMIKU_WINE
 #   WINEMIKU_PREFIX    기본 prefix (WINEPREFIX 가 우선)             기본: <저장소>/prefix
 #   WINEMIKU_TEMPLATE  깨끗한 prefix 템플릿                         기본: <저장소>/.cache/prefix-template
 #   WINEMIKU_OVERRIDE  개발용으로 빌드한 파일 (없으면 생략)          기본: <저장소>/override
@@ -62,7 +62,7 @@ wine_id() { cat "$RT/.vanilla" 2>/dev/null || readlink -f "$RT"; }
 
 # wine 버전 + 레지스트리 설정 + 폰트가 같으면 같은 prefix 로 본다
 prefix_key() {
-    { wine_id; sha256sum < "$SHARE/prefix.reg"; readlink -f "$SHARE/cjk-fonts"; readlink -f "$SHARE/dxvk"; } |
+    { wine_id; sha256sum < "$SHARE/prefix.reg"; readlink -f "$SHARE/cjk-fonts" "$SHARE/fonts" "$SHARE/dxvk"; } |
         sha256sum | cut -d' ' -f1
 }
 
@@ -116,6 +116,10 @@ setup_prefix() {
     mkdir -p "$PREFIX/drive_c/windows/Fonts"
     for f in NotoSansCJK-Regular.ttc NotoSansCJK-Bold.ttc; do
         ln -sfn "$SHARE/cjk-fonts/$f" "$PREFIX/drive_c/windows/Fonts/$f"
+    done
+    # scripts/gen-fonts.py 가 만든 폰트 (Segoe UI·Malgun Gothic 이름의 Noto, DejaVu Sans, Arimo. 등록은 prefix.reg)
+    for f in "$SHARE"/fonts/*; do
+        ln -sfn "$f" "$PREFIX/drive_c/windows/Fonts/${f##*/}"
     done
     cp -f "$SHARE/prefix.reg" "$PREFIX/.wm-prefix.reg"
     "$WINE" regedit /S "Z:${PREFIX//\//\\}\\.wm-prefix.reg" >/dev/null 2>&1 || die "레지스트리 적용 실패"

@@ -48,12 +48,48 @@
         ln -s ${patchDxvk pkgs.dxvk.dxvk32}/bin $out/x32
       ''; # x64/ x32/ 에 DLL
 
+      # Arimo (Arial 대체, Google Fonts. 가변 폰트 -> gen-fonts.py 가 고정 굵기로)
+      arimo = pkgs.fetchurl {
+        name = "Arimo-wght.ttf";
+        url = "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/arimo/Arimo%5Bwght%5D.ttf";
+        hash = "sha256-5DiYsUPsgmrIy0A0gWRYpwR/vgg2VY3iofjGIjrj4Mo=";
+      };
+
+      # prefix 에 넣을 고정 굵기 폰트: Segoe UI = Noto Sans, Malgun Gothic = Noto Sans CJK KR,
+      # DejaVu Sans(Tahoma 대체), Arimo(Arial 대체). scripts/gen-fonts.py 설명 참고
+      winemiku-fonts = pkgs.runCommand "winemiku-fonts"
+        { nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.fonttools ])) ]; } ''
+        python3 -I ${./scripts/gen-fonts.py} ${pkgs.noto-fonts}/share/fonts/noto/NotoSans.ttf \
+          ${cjkFonts}/NotoSansCJK-Regular.ttc ${cjkFonts}/NotoSansCJK-Bold.ttc \
+          ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf \
+          ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans-Bold.ttf \
+          ${arimo} $out
+      '';
+
       # bin/winemiku 가 prefix 에 적용하는 데이터: 레지스트리 설정, 폰트, DXVK
       winemiku-share = pkgs.runCommand "winemiku-share" { nativeBuildInputs = [ pkgs.python3 ]; } ''
         mkdir -p $out
         python3 -I ${./scripts/gen-prefix-reg.py} $out/prefix.reg
         ln -s ${cjkFonts} $out/cjk-fonts
+        ln -s ${winemiku-fonts} $out/fonts
         ln -s ${dxvk} $out/dxvk
+      '';
+
+      # 실행용 wine: 빌드된 wine 의 심볼릭 링크 복제본에서 내장 Tahoma/Arial 만 뺀다 (컴파일 없음).
+      # 내장본은 작은 글씨가 깨지는 대체품이라 prefix.reg 의 Replacements 로 Segoe UI(Noto Sans)에
+      # 연결하는데, 같은 이름의 폰트가 있으면 Wine 이 Replacements 를 무시한다.
+      # Wine 은 ntdll.so 의 실제 위치 기준으로 share/wine 을 찾으므로 실행파일과 ntdll.so 는 복사
+      # (개발 모드 runtime/ 과 같은 방식, scripts/dev.sh _wm_runtime).
+      wineRuntime = wine: pkgs.runCommand "${wine.name}-runtime"
+        { nativeBuildInputs = [ pkgs.python3 ]; passthru = { inherit (wine) version; }; } ''
+        cp -rs ${wine}/. $out && chmod -R u+w $out
+        for f in bin/wine bin/.wine lib/wine/x86_64-unix/{wine,wine-preloader,ntdll.so}; do
+          [ -e ${wine}/$f ] || continue
+          rm -f $out/$f; cp -L ${wine}/$f $out/$f
+        done
+        python3 -I ${./scripts/rewrap.py} ${wine} $out
+        rm -f $out/share/wine/fonts/{tahoma,tahomabd,arial}.ttf
+        echo ${wine} > $out/.vanilla
       '';
 
       # 배포용: 실행기 + 패치된 wine + 데이터. nix run 으로 바로 쓴다.
@@ -68,7 +104,7 @@
         patchShebangs $out/libexec/winemiku
         makeWrapper $out/libexec/winemiku $out/bin/winemiku \
           --prefix PATH : ${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused procps diffutils ])} \
-          --set WINEMIKU_WINE ${wine} \
+          --set WINEMIKU_WINE ${wineRuntime wine} \
           --set WINEMIKU_SHARE ${winemiku-share} \
           --set WINEMIKU_OVERRIDE "" \
           --set WINEMIKU_SELF $out/bin/winemiku \
@@ -81,7 +117,7 @@
     in {
       packages.${system} = {
         default = winemiku;
-        inherit winemiku winemiku-unpatched wine-miku wine-vanilla winemiku-share;
+        inherit winemiku winemiku-unpatched wine-miku wine-vanilla winemiku-share winemiku-fonts;
       };
 
       apps.${system}.default = {
@@ -94,6 +130,7 @@
         nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ pkgs.git ];
         WINE_VANILLA = wine-vanilla;
         WM_CJK_FONTS = cjkFonts;
+        WM_FONTS = winemiku-fonts;
         WM_DXVK = dxvk;
         shellHook = ''
           source ${./scripts/dev.sh}

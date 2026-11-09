@@ -50,6 +50,7 @@ NixOS가 아니면 `/etc/nix/nix.conf`에 같은 내용을 넣거나(`extra-subs
 | `winemiku-unpatched` | 실행기 + 캐시의 Wine(패치 없음) + 데이터 |
 | `wine-miku` | 패치된 Wine만 |
 | `winemiku-share` | prefix 데이터 (레지스트리 설정, 폰트, 패치된 DXVK 링크) |
+| `winemiku-fonts` | prefix용 고정 굵기 폰트 (Segoe UI·Malgun Gothic 이름의 Noto, DejaVu Sans, Arimo) |
 
 ## 개발
 
@@ -107,12 +108,22 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
   트레이로 숨은 앱(카카오톡 등)은 다시 실행하면 창이 뜬다. 완전히 끄려면 `bin/winemiku --kill`.
 - **Wayland 전용**: `DISPLAY`를 지우고 레지스트리 `HKCU\Software\Wine\Drivers\Graphics=wayland`로 고정. XWayland로 빠지지 않음.
 - **한국어**: `LANG/LC_ALL=ko_KR.UTF-8` (코드페이지 949, 비유니코드 앱 대응). 바꾸려면 `WM_LANG=ja_JP.UTF-8 wm-run ...`
-- **한글 폰트**: Noto Sans CJK KR(static)을 prefix `Fonts/`에 링크하고, 굴림·돋움·바탕·맑은 고딕 등을 대체(FontSubstitutes),
-  Tahoma·MS Shell Dlg·Segoe UI 등 서양 UI 폰트에 한글 폴백(FontLink)을 건다. 설정 내용은 [scripts/gen-prefix-reg.py](scripts/gen-prefix-reg.py).
-  이 파일을 고치면 다음 `wm-run` 때 자동 재적용.
+- **폰트**: 앱은 폰트를 이름으로 찾는다. Windows 기본 UI 폰트 이름으로 고정 굵기 Noto를 등록한다
+  ([scripts/gen-fonts.py](scripts/gen-fonts.py), Nix가 빌드).
+  - `Segoe UI` = Noto Sans, `Malgun Gothic` = Noto Sans CJK KR. 굴림·돋움·바탕 등은 Malgun Gothic으로 대체(FontSubstitutes).
+  - Wine 내장 **Tahoma·Arial은 뺀다**(`runtime`/`wineRuntime`에서 링크 제외). Wine이 만든 대체품이라 작은 글씨가 깨진다.
+    대신 `HKCU\Software\Wine\Fonts\Replacements`로 **Tahoma → DejaVu Sans, Arial → Arimo**(Arial과 글자 폭이 같음)에 연결한다.
+    Wine은 같은 이름의 폰트가 있으면 Replacements를 무시해서 내장본을 빼야 한다. Wine 자체 대화상자(기본 글꼴 Tahoma)도 DejaVu Sans가 된다.
+  - 카카오톡은 영어·숫자를 Tahoma·Arial로, 한글을 맑은 고딕 계열로 그린다. 이름이 없으면 한글은 시스템의 **가변** Noto CJK로
+    빠지는데, Wine은 가변 폰트를 제대로 못 다뤄 글자 간격이 벌어진다. 그래서 가변 폰트는 고정 굵기(400/700)로 뽑아서 쓴다.
+  - Wine의 DirectWrite는 레지스트리 FontSubstitutes를 보지 않고(Qt와 GDI는 봄), prefix `Fonts/`의 파일도
+    `HKLM\...\Fonts`에 등록된 것만 본다. 그래서 대체가 아니라 폰트 이름 자체를 바꿔 등록한다.
+  - 서양 UI 폰트에는 한글 폴백(FontLink)도 건다(GDI용). 설정 내용은 [scripts/gen-prefix-reg.py](scripts/gen-prefix-reg.py).
+    이 파일을 고치면 다음 실행 때 자동 재적용.
 - 터미널로 파이프한 출력(`wm-run reg query ... | less` 등)은 CP949라 깨져 보인다. `| iconv -f CP949`를 붙일 것.
 
-`wm-run`은 `runtime/`(vanilla wine의 심볼릭 링크 복제본)에 `override/`의 DLL을 끼워 넣어 실행합니다.
+`wm-run`은 `runtime/`(vanilla wine의 심볼릭 링크 복제본, 내장 Tahoma·Arial 제외)에 `override/`의 DLL을 끼워 넣어 실행합니다.
+배포판(`nix run`)도 같은 방식의 복제본(`flake.nix`의 `wineRuntime`)을 써서 Wine을 다시 컴파일하지 않습니다.
 Wine은 설치 디렉터리를 `WINEDLLPATH`보다 먼저 찾기 때문에 `WINEDLLPATH`로는 빌트인 DLL을 덮어쓸 수 없습니다.
 
 - 새로 추가한 소스 파일은 `wm-patch` 전에 `git -C src/wine-* add <파일>` 필요.

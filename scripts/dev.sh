@@ -92,8 +92,12 @@ _wm_runtime() {
     _wm_gcroot wine "$WINE_VANILLA"
     _wm_gcroot cjk-fonts "${WM_CJK_FONTS%/share/*}"
     _wm_gcroot dxvk "$WM_DXVK"
+    _wm_gcroot fonts "$WM_FONTS"
     ln -sfn "$WM_CJK_FONTS" "$WM_RUNTIME/cjk-fonts"
+    ln -sfn "$WM_FONTS" "$WM_RUNTIME/fonts"
     ln -sfn "$WM_DXVK" "$WM_RUNTIME/dxvk"
+    # 내장 Tahoma/Arial 빼기 (flake.nix wineRuntime 과 같은 이유)
+    rm -f "${WM_RUNTIME:?}"/share/wine/fonts/{tahoma,tahomabd,arial}.ttf
     python3 -I "$WM_ROOT/scripts/gen-prefix-reg.py" "$WM_RUNTIME/prefix.reg.new" || return 1
     if cmp -s "$WM_RUNTIME/prefix.reg.new" "$WM_RUNTIME/prefix.reg"; then
         rm -f "$WM_RUNTIME/prefix.reg.new"
