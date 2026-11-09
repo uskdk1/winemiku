@@ -85,8 +85,9 @@ def main() -> None:
         r"[HKEY_CURRENT_USER\Software\Wine\DllOverrides]",
         *(f'"{dll}"="native,builtin"' for dll in ("d3d8", "d3d9", "d3d10core", "d3d11", "dxgi")),
         "",
-        # Wayland 엔 트레이가 없어서 explorer 가 대신 띄우는 작은 트레이 창(Shell_TrayWnd)이
-        # 진짜 창이 되어 포커스를 뺏는다(SWP_NOACTIVATE 무시). 끈다.
+        # 트레이 아이콘은 patches/0004 가 바(StatusNotifierItem)로 보낸다. 그게 안 될 때(세션 버스 없음)
+        # explorer 가 대신 띄우는 작은 트레이 창(Shell_TrayWnd)은 진짜 창이 되어 포커스를 뺏는다
+        # (SWP_NOACTIVATE 무시). 끈다.
         r"[HKEY_CURRENT_USER\Software\Wine\Explorer]",
         '"ShowSystray"=dword:00000000',
         "",

@@ -1,0 +1,2015 @@
+diff --git a/dlls/winewayland.drv/Makefile.in b/dlls/winewayland.drv/Makefile.in
+index 411d045..6a013bb 100644
+--- a/dlls/winewayland.drv/Makefile.in
++++ b/dlls/winewayland.drv/Makefile.in
+@@ -1,7 +1,7 @@
+ MODULE = winewayland.drv
+ UNIXLIB = winewayland.so
+-UNIX_CFLAGS = $(EGL_CFLAGS) $(WAYLAND_CLIENT_CFLAGS) $(WAYLAND_EGL_CFLAGS) $(XKBCOMMON_CFLAGS) $(XKBREGISTRY_CFLAGS)
+-UNIX_LIBS = -lwin32u $(WAYLAND_CLIENT_LIBS) $(WAYLAND_EGL_LIBS) $(XKBCOMMON_LIBS) $(XKBREGISTRY_LIBS) $(PTHREAD_LIBS) -lm
++UNIX_CFLAGS = $(DBUS_CFLAGS) $(EGL_CFLAGS) $(WAYLAND_CLIENT_CFLAGS) $(WAYLAND_EGL_CFLAGS) $(XKBCOMMON_CFLAGS) $(XKBREGISTRY_CFLAGS)
++UNIX_LIBS = -lwin32u $(DBUS_LIBS) $(WAYLAND_CLIENT_LIBS) $(WAYLAND_EGL_LIBS) $(XKBCOMMON_LIBS) $(XKBREGISTRY_LIBS) $(PTHREAD_LIBS) -lm
+ IMPORTS = user32 win32u
+ 
+ VER_FILEDESCRIPTION_STR = "Wine Wayland driver"
+@@ -26,11 +26,13 @@ SOURCES = \
+ 	wayland_output.c \
+ 	wayland_pointer.c \
+ 	wayland_surface.c \
++	wayland_systray.c \
+ 	wayland_text_input.c \
+ 	waylanddrv_main.c \
+ 	window.c \
+ 	window_surface.c \
+ 	wlr-data-control-unstable-v1.xml \
++	wlr-layer-shell-unstable-v1.xml \
+ 	xdg-output-unstable-v1.xml \
+ 	xdg-shell.xml \
+ 	xdg-toplevel-icon-v1.xml
+diff --git a/dlls/winewayland.drv/dllmain.c b/dlls/winewayland.drv/dllmain.c
+index 8055d88..0932ca4 100644
+--- a/dlls/winewayland.drv/dllmain.c
++++ b/dlls/winewayland.drv/dllmain.c
+@@ -38,6 +38,13 @@ static DWORD WINAPI wayland_read_events_thread(void *arg)
+     return 0;
+ }
+ 
++static DWORD WINAPI systray_thread(void *arg)
++{
++    /* Exports the tray icons as StatusNotifierItems (explorer only). */
++    WAYLANDDRV_UNIX_CALL(systray_run, NULL);
++    return 0;
++}
++
+ static LRESULT CALLBACK clipboard_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
+     switch (msg)
+@@ -110,6 +117,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
+     /* Handle clipboard events in a dedicated thread, if needed. */
+     if (!WAYLANDDRV_UNIX_CALL(init_clipboard, NULL))
+         CloseHandle(CreateThread(NULL, 0, clipboard_thread, NULL, 0, &tid));
++    /* Tray icons over D-Bus, if this is the explorer process. */
++    if (!WAYLANDDRV_UNIX_CALL(systray_init, NULL))
++        CloseHandle(CreateThread(NULL, 0, systray_thread, NULL, 0, &tid));
+ 
+     return TRUE;
+ }
+diff --git a/dlls/winewayland.drv/unixlib.h b/dlls/winewayland.drv/unixlib.h
+index d9378fe..0ca88d3 100644
+--- a/dlls/winewayland.drv/unixlib.h
++++ b/dlls/winewayland.drv/unixlib.h
+@@ -28,6 +28,8 @@ enum waylanddrv_unix_func
+     waylanddrv_unix_func_init,
+     waylanddrv_unix_func_read_events,
+     waylanddrv_unix_func_init_clipboard,
++    waylanddrv_unix_func_systray_init,
++    waylanddrv_unix_func_systray_run,
+     waylanddrv_unix_func_count,
+ };
+ 
+diff --git a/dlls/winewayland.drv/wayland.c b/dlls/winewayland.drv/wayland.c
+index 118ee2d..f88c640 100644
+--- a/dlls/winewayland.drv/wayland.c
++++ b/dlls/winewayland.drv/wayland.c
+@@ -184,6 +184,11 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
+         process_wayland.zwlr_data_control_manager_v1 =
+             wl_registry_bind(registry, id, &zwlr_data_control_manager_v1_interface, 1);
+     }
++    else if (strcmp(interface, "zwlr_layer_shell_v1") == 0)
++    {
++        process_wayland.zwlr_layer_shell_v1 =
++            wl_registry_bind(registry, id, &zwlr_layer_shell_v1_interface, min(version, 4));
++    }
+     else if (strcmp(interface, "wl_data_device_manager") == 0)
+     {
+         process_wayland.wl_data_device_manager =
+diff --git a/dlls/winewayland.drv/wayland_pointer.c b/dlls/winewayland.drv/wayland_pointer.c
+index 0c190a9..8812cd5 100644
+--- a/dlls/winewayland.drv/wayland_pointer.c
++++ b/dlls/winewayland.drv/wayland_pointer.c
+@@ -122,6 +122,41 @@ static HWND wayland_pointer_get_focused_hwnd(void)
+     return hwnd;
+ }
+ 
++static BOOL wayland_pointer_on_catcher(void)
++{
++    struct wayland_pointer *pointer = &process_wayland.pointer;
++    BOOL ret;
++
++    pthread_mutex_lock(&pointer->mutex);
++    ret = pointer->focused_catcher;
++    pthread_mutex_unlock(&pointer->mutex);
++
++    return ret;
++}
++
++/* A click on the tray menu click catcher: move the cursor far away from the
++ * menu (and its submenus), so that the click is outside of it. */
++static void move_cursor_out_of_menu(HWND hwnd)
++{
++    RECT screen = NtUserGetVirtualScreenRect(MDT_DEFAULT), rect;
++    struct wayland_win_data *data;
++    INPUT input = {0};
++
++    if (!(data = wayland_win_data_get(hwnd))) return;
++    rect = data->wayland_surface ? data->wayland_surface->window.rect : data->rects.window;
++    wayland_win_data_release(data);
++
++    input.type = INPUT_MOUSE;
++    input.mi.dx = (rect.left + rect.right) / 2 < (screen.left + screen.right) / 2 ?
++                  screen.right - 1 : screen.left;
++    input.mi.dy = (rect.top + rect.bottom) / 2 < (screen.top + screen.bottom) / 2 ?
++                  screen.bottom - 1 : screen.top;
++    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
++    TRACE("hwnd=%p menu=%s click at %d,%d\n", hwnd, wine_dbgstr_rect(&rect),
++          (int)input.mi.dx, (int)input.mi.dy);
++    NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
++}
++
+ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
+ {
+     INPUT input = {0};
+@@ -132,6 +167,7 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
+     struct wayland_win_data *data;
+ 
+     if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
++    if (wayland_pointer_on_catcher()) return; /* outside of the tray menu: no motion */
+     if (!(data = wayland_win_data_get(hwnd))) return;
+     if (!(surface = data->wayland_surface))
+     {
+@@ -196,6 +232,7 @@ static void pointer_handle_enter(void *data, struct wl_pointer *wl_pointer,
+ 
+     pthread_mutex_lock(&pointer->mutex);
+     pointer->focused_hwnd = hwnd;
++    pointer->focused_catcher = wayland_surface_is_catcher(wl_surface);
+     pointer->enter_serial = serial;
+     pthread_mutex_unlock(&pointer->mutex);
+ 
+@@ -222,6 +259,7 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
+ 
+     pthread_mutex_lock(&pointer->mutex);
+     pointer->focused_hwnd = NULL;
++    pointer->focused_catcher = FALSE;
+     pointer->enter_serial = 0;
+     pthread_mutex_unlock(&pointer->mutex);
+ }
+@@ -267,6 +305,7 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
+ 
+     TRACE("hwnd=%p button=%#x state=%u\n", hwnd, button, state);
+ 
++    if (wayland_pointer_on_catcher()) move_cursor_out_of_menu(hwnd);
+     NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+ }
+ 
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index 9b6bcb5..f3fec13 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -167,6 +167,142 @@ static const struct xdg_surface_listener xdg_surface_listener =
+     xdg_surface_handle_configure
+ };
+ 
++static void layer_surface_handle_configure(void *private, struct zwlr_layer_surface_v1 *layer_surface,
++                                           uint32_t serial, uint32_t width, uint32_t height)
++{
++    struct wayland_surface *surface;
++    struct wayland_win_data *data;
++    BOOL initial_configure = FALSE;
++    HWND hwnd = private;
++
++    TRACE("hwnd=%p serial=%u %ux%u\n", hwnd, serial, width, height);
++
++    if (!(data = wayland_win_data_get(hwnd))) return;
++    if ((surface = data->wayland_surface) && surface->role == WAYLAND_SURFACE_ROLE_LAYER &&
++        surface->layer_surface == layer_surface)
++    {
++        /* we choose the size ourselves, so there is nothing to process */
++        zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
++        initial_configure = surface->current.serial == 0;
++        surface->current.serial = serial;
++    }
++    wayland_win_data_release(data);
++
++    if (initial_configure) NtUserExposeWindowSurface(hwnd, 0, NULL);
++}
++
++static void layer_surface_handle_closed(void *private, struct zwlr_layer_surface_v1 *layer_surface)
++{
++    TRACE("hwnd=%p\n", private);
++    NtUserPostMessage(private, WM_CANCELMODE, 0, 0);
++}
++
++static const struct zwlr_layer_surface_v1_listener layer_surface_listener =
++{
++    layer_surface_handle_configure,
++    layer_surface_handle_closed,
++};
++
++static const char *catcher_tag = "winewayland-tray-catcher";
++
++BOOL wayland_surface_is_catcher(struct wl_surface *wl_surface)
++{
++    return wl_proxy_get_tag((struct wl_proxy *)wl_surface) == &catcher_tag;
++}
++
++static void catcher_handle_configure(void *private, struct zwlr_layer_surface_v1 *layer_surface,
++                                     uint32_t serial, uint32_t width, uint32_t height)
++{
++    struct wayland_surface *surface;
++    struct wayland_win_data *data;
++    HWND hwnd = private;
++
++    TRACE("hwnd=%p serial=%u %ux%u\n", hwnd, serial, width, height);
++
++    if (!(data = wayland_win_data_get(hwnd))) return;
++    if ((surface = data->wayland_surface) && surface->role == WAYLAND_SURFACE_ROLE_LAYER &&
++        surface->catcher_layer == layer_surface)
++    {
++        zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
++        if (width && height)
++        {
++            wp_viewport_set_destination(surface->catcher_viewport, width, height);
++            wl_surface_attach(surface->catcher_surface, surface->catcher_buffer->wl_buffer, 0, 0);
++            wl_surface_damage_buffer(surface->catcher_surface, 0, 0, 1, 1);
++        }
++        wl_surface_commit(surface->catcher_surface);
++        wl_display_flush(process_wayland.wl_display);
++    }
++    wayland_win_data_release(data);
++}
++
++static const struct zwlr_layer_surface_v1_listener catcher_listener =
++{
++    catcher_handle_configure,
++    layer_surface_handle_closed,
++};
++
++static void destroy_catcher(struct wayland_surface *surface)
++{
++    struct wayland_pointer *pointer = &process_wayland.pointer;
++
++    pthread_mutex_lock(&pointer->mutex);
++    if (pointer->focused_catcher && pointer->focused_hwnd == surface->hwnd)
++    {
++        pointer->focused_hwnd = NULL;
++        pointer->focused_catcher = FALSE;
++        pointer->enter_serial = 0;
++    }
++    pthread_mutex_unlock(&pointer->mutex);
++
++    if (surface->catcher_layer) zwlr_layer_surface_v1_destroy(surface->catcher_layer);
++    if (surface->catcher_viewport) wp_viewport_destroy(surface->catcher_viewport);
++    if (surface->catcher_surface) wl_surface_destroy(surface->catcher_surface);
++    if (surface->catcher_buffer) wayland_shm_buffer_unref(surface->catcher_buffer);
++    surface->catcher_layer = NULL;
++    surface->catcher_viewport = NULL;
++    surface->catcher_surface = NULL;
++    surface->catcher_buffer = NULL;
++}
++
++/* Clicks outside of a tray menu never reach us on Wayland, so cover the
++ * output (except the bars) with a transparent surface below the menu. Its
++ * clicks are sent to the menu as clicks outside of it, which closes it. */
++static void create_catcher(struct wayland_surface *surface, struct wl_output *wl_output)
++{
++    if (!process_wayland.wp_viewporter) return;
++
++    if (!(surface->catcher_buffer = wayland_shm_buffer_create(1, 1, WL_SHM_FORMAT_ARGB8888)) ||
++        !(surface->catcher_surface = wl_compositor_create_surface(process_wayland.wl_compositor)))
++        goto failed;
++    wl_surface_set_user_data(surface->catcher_surface, surface->hwnd);
++    wl_proxy_set_tag((struct wl_proxy *)surface->catcher_surface, &catcher_tag);
++    memset(surface->catcher_buffer->map_data, 0, surface->catcher_buffer->map_size);
++
++    if (!(surface->catcher_viewport = wp_viewporter_get_viewport(process_wayland.wp_viewporter,
++                                                                 surface->catcher_surface)))
++        goto failed;
++    /* the top layer is below the menu (overlay) but above the windows */
++    if (!(surface->catcher_layer =
++          zwlr_layer_shell_v1_get_layer_surface(process_wayland.zwlr_layer_shell_v1,
++                                                surface->catcher_surface, wl_output,
++                                                ZWLR_LAYER_SHELL_V1_LAYER_TOP,
++                                                "wine-tray-menu-catcher")))
++        goto failed;
++    zwlr_layer_surface_v1_add_listener(surface->catcher_layer, &catcher_listener, surface->hwnd);
++    zwlr_layer_surface_v1_set_anchor(surface->catcher_layer,
++                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
++                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
++    zwlr_layer_surface_v1_set_size(surface->catcher_layer, 0, 0);
++    zwlr_layer_surface_v1_set_exclusive_zone(surface->catcher_layer, 0);
++    wl_surface_commit(surface->catcher_surface);
++    return;
++
++failed:
++    ERR("failed to create the tray menu click catcher\n");
++    destroy_catcher(surface);
++}
++
+ static void xdg_toplevel_handle_configure(void *private,
+                                           struct xdg_toplevel *xdg_toplevel,
+                                           int32_t width, int32_t height,
+@@ -499,6 +635,81 @@ err:
+     ERR("Failed to assign subsurface role to wayland surface\n");
+ }
+ 
++/**********************************************************************
++ *          wayland_surface_make_layer
++ *
++ * Gives the layer surface role to a plain wayland surface, placed at the
++ * given compositor (logical, global) position. Used for tray menus, which
++ * must appear next to the bar on Wayland where clients can't position
++ * their toplevels.
++ */
++void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
++{
++    struct wayland_output *output;
++    struct wl_output *wl_output = NULL;
++    RECT output_rect = {0};
++
++    assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_LAYER);
++    if (surface->layer_surface) return;
++
++    wayland_surface_clear_role(surface);
++    surface->role = WAYLAND_SURFACE_ROLE_LAYER;
++
++    pthread_mutex_lock(&process_wayland.output_mutex);
++    wl_list_for_each(output, &process_wayland.output_list, link)
++    {
++        RECT rect;
++        BOOL inside;
++
++        SetRect(&rect, output->current.logical_x, output->current.logical_y,
++                output->current.logical_x + output->current.logical_w,
++                output->current.logical_y + output->current.logical_h);
++        inside = pos.x >= rect.left && pos.x < rect.right && pos.y >= rect.top && pos.y < rect.bottom;
++        /* the output that was clicked, or else the first one */
++        if (!wl_output || inside)
++        {
++            wl_output = output->wl_output;
++            output_rect = rect;
++        }
++        if (inside) break;
++    }
++    pthread_mutex_unlock(&process_wayland.output_mutex);
++
++    TRACE("surface=%p pos=%s output=%s\n", surface, wine_dbgstr_point(&pos),
++          wine_dbgstr_rect(&output_rect));
++
++    surface->layer_surface =
++        zwlr_layer_shell_v1_get_layer_surface(process_wayland.zwlr_layer_shell_v1,
++                                              surface->wl_surface, wl_output,
++                                              ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
++                                              "wine-tray-menu");
++    if (!surface->layer_surface)
++    {
++        wayland_surface_clear_role(surface);
++        ERR("Failed to assign layer surface role to wayland surface\n");
++        return;
++    }
++    zwlr_layer_surface_v1_add_listener(surface->layer_surface, &layer_surface_listener,
++                                       surface->hwnd);
++    if (zwlr_layer_surface_v1_get_version(surface->layer_surface) >=
++        ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND_SINCE_VERSION)
++        zwlr_layer_surface_v1_set_keyboard_interactivity(
++            surface->layer_surface, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND);
++    /* avoid the bar's exclusive zone, i.e. open just below/above it */
++    zwlr_layer_surface_v1_set_exclusive_zone(surface->layer_surface, 0);
++
++    create_catcher(surface, wl_output);
++
++    surface->layer_pos.x = pos.x - output_rect.left;
++    surface->layer_pos.y = pos.y - output_rect.top;
++    surface->layer_output = output_rect;
++    surface->layer_width = surface->layer_height = 0;
++    surface->layer_committed = FALSE;
++
++    wayland_surface_init_fractional_scale(surface, 1.0);
++    /* the initial commit needs a size, done in wayland_surface_reconfigure_layer */
++}
++
+ /**********************************************************************
+  *          wayland_surface_clear_role
+  *
+@@ -555,6 +766,16 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
+ 
+         surface->owner_hwnd = NULL;
+         break;
++
++    case WAYLAND_SURFACE_ROLE_LAYER:
++        destroy_catcher(surface);
++        if (surface->layer_surface)
++        {
++            zwlr_layer_surface_v1_destroy(surface->layer_surface);
++            surface->layer_surface = NULL;
++        }
++        surface->layer_committed = FALSE;
++        break;
+     }
+ 
+     memset(&surface->pending, 0, sizeof(surface->pending));
+@@ -877,6 +1098,53 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
+     wayland_win_data_release(owner_data);
+ }
+ 
++/**********************************************************************
++ *          wayland_surface_reconfigure_layer
++ *
++ * Sizes and places the layer surface. Returns whether it can show contents.
++ */
++static BOOL wayland_surface_reconfigure_layer(struct wayland_surface *surface, RECT rect)
++{
++    int width = rect.right - rect.left, height = rect.bottom - rect.top;
++    int output_w = surface->layer_output.right - surface->layer_output.left;
++    int output_h = surface->layer_output.bottom - surface->layer_output.top;
++    uint32_t anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
++    int left;
++
++    if (width <= 0 || height <= 0) return FALSE;
++
++    if (width != surface->layer_width || height != surface->layer_height ||
++        !surface->layer_committed)
++    {
++        /* open at the click, but keep the menu inside the output */
++        left = surface->layer_pos.x;
++        if (output_w > 0 && left + width > output_w) left = output_w - width;
++        if (left < 0) left = 0;
++        /* a bar at the bottom: open upwards */
++        if (output_h > 0 && surface->layer_pos.y > output_h / 2)
++            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
++        else
++            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
++
++        TRACE("hwnd=%p size=%dx%d left=%d anchor=%#x\n", surface->hwnd, width, height, left, anchor);
++
++        zwlr_layer_surface_v1_set_size(surface->layer_surface, width, height);
++        zwlr_layer_surface_v1_set_anchor(surface->layer_surface, anchor);
++        zwlr_layer_surface_v1_set_margin(surface->layer_surface, 0, 0, 0, left);
++        surface->layer_width = width;
++        surface->layer_height = height;
++
++        if (!surface->layer_committed)
++        {
++            wl_surface_commit(surface->wl_surface);
++            wl_display_flush(process_wayland.wl_display);
++            surface->layer_committed = TRUE;
++        }
++    }
++
++    return surface->current.serial != 0;
++}
++
+ /**********************************************************************
+  *          wayland_surface_reconfigure
+  *
+@@ -905,6 +1173,10 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
+         if (!surface->wl_subsurface) break; /* surface role has been cleared */
+         wayland_surface_reconfigure_subsurface(surface);
+         break;
++    case WAYLAND_SURFACE_ROLE_LAYER:
++        if (!surface->layer_surface) break; /* surface role has been cleared */
++        if (!wayland_surface_reconfigure_layer(surface, rect)) return FALSE;
++        break;
+     }
+ 
+     wayland_surface_reconfigure_size(surface, rect.right - rect.left, rect.bottom - rect.top);
+diff --git a/dlls/winewayland.drv/wayland_systray.c b/dlls/winewayland.drv/wayland_systray.c
+new file mode 100644
+index 0000000..311f839
+--- /dev/null
++++ b/dlls/winewayland.drv/wayland_systray.c
+@@ -0,0 +1,972 @@
++/*
++ * Wayland driver system tray: StatusNotifierItem (SNI) over D-Bus
++ *
++ * Wayland has no XEmbed-style tray, so the icons that explorer receives
++ * through Shell_NotifyIcon are exported as org.kde.StatusNotifierItem
++ * objects, which bars like waybar, KDE Plasma, AGS/quickshell etc. show.
++ *
++ * Only the explorer process runs this. Every icon gets its own private
++ * session bus connection with its own well-known name, so removing an
++ * icon is just closing that connection (hosts drop items whose name owner
++ * vanished). All D-Bus work happens in one thread (systray_run), the
++ * NotifyIcon calls only update the icon data and wake that thread.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++
++#ifdef SONAME_LIBDBUS_1
++#include <dbus/dbus.h>
++#endif
++
++#include "ntstatus.h"
++
++#include "waylanddrv.h"
++#include "ntuser.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(systray);
++
++/* Where the tray was last clicked, for placing the tray menu (see window.c).
++ * explorer sets these on the desktop window, the icon owner process reads them. */
++static const WCHAR click_pid_prop[] = {'_','_','w','i','n','e','_','t','r','a','y','_','p','i','d',0};
++static const WCHAR click_pos_prop[] = {'_','_','w','i','n','e','_','t','r','a','y','_','p','o','s',0};
++static const WCHAR click_time_prop[] = {'_','_','w','i','n','e','_','t','r','a','y','_','t','i','m','e',0};
++
++/***********************************************************************
++ *           wayland_systray_take_menu_pos
++ *
++ * Returns the tray click position (compositor coordinates) if a tray icon
++ * of this process was just clicked. Only the first caller gets it.
++ */
++BOOL wayland_systray_take_menu_pos(POINT *pos)
++{
++    static LONG last_time;
++    HWND desktop = NtUserGetDesktopWindow();
++    DWORD pid, time, packed;
++
++    pid = HandleToUlong(NtUserGetProp(desktop, click_pid_prop));
++    if (pid != GetCurrentProcessId()) return FALSE;
++    time = HandleToUlong(NtUserGetProp(desktop, click_time_prop));
++    if (!time || NtGetTickCount() - time > 2000) return FALSE;
++    if (InterlockedExchange(&last_time, time) == time) return FALSE;
++
++    packed = HandleToUlong(NtUserGetProp(desktop, click_pos_prop));
++    pos->x = (SHORT)LOWORD(packed);
++    pos->y = (SHORT)HIWORD(packed);
++    TRACE("tray menu at %s\n", wine_dbgstr_point(pos));
++    return TRUE;
++}
++
++#ifdef SONAME_LIBDBUS_1
++
++#define WATCHER_NAME    "org.kde.StatusNotifierWatcher"
++#define WATCHER_PATH    "/StatusNotifierWatcher"
++#define ITEM_IFACE      "org.kde.StatusNotifierItem"
++#define ITEM_PATH       "/StatusNotifierItem"
++#define PROPS_IFACE     "org.freedesktop.DBus.Properties"
++#define INTROSPECT_IFACE "org.freedesktop.DBus.Introspectable"
++
++enum
++{
++    UPDATE_ICON   = 0x1,
++    UPDATE_TIP    = 0x2,
++    UPDATE_STATUS = 0x4,
++};
++
++struct sni_icon
++{
++    struct list entry;
++    /* protected by sni_mutex */
++    HWND owner;
++    UINT id;
++    UINT callback_message;
++    UINT version;
++    BOOL hidden;
++    BOOL deleted;          /* freed by the systray thread */
++    unsigned int updates;  /* UPDATE_* signals to emit */
++    char *tip;             /* UTF-8 */
++    unsigned char *pixels; /* ARGB32, network byte order (SNI IconPixmap) */
++    int width, height;
++    /* only used by the systray thread */
++    unsigned int number;
++    DBusConnection *conn;
++    char bus_name[64];
++};
++
++static pthread_mutex_t sni_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t sni_cond = PTHREAD_COND_INITIALIZER;
++static struct list sni_icons = LIST_INIT(sni_icons);
++static enum { SNI_DISABLED, SNI_STARTING, SNI_RUNNING } sni_state = SNI_DISABLED;
++static int wake_pipe[2] = {-1, -1};
++static unsigned int next_number;
++
++/* systray thread only */
++static DBusConnection *main_conn;
++static BOOL watcher_present;
++static BOOL reregister_all;
++
++static void wake_systray_thread(void)
++{
++    char c = 0;
++    while (write(wake_pipe[1], &c, 1) == -1 && errno == EINTR) continue;
++}
++
++static char *utf8_from_wstr(const WCHAR *str)
++{
++    DWORD len = lstrlenW(str), size = 0;
++    char *ret;
++
++    RtlUnicodeToUTF8N(NULL, 0, &size, str, len * sizeof(WCHAR));
++    if (!(ret = malloc(size + 1))) return NULL;
++    RtlUnicodeToUTF8N(ret, size, &size, str, len * sizeof(WCHAR));
++    ret[size] = 0;
++    return ret;
++}
++
++/* convert an icon to the non-premultiplied, big-endian ARGB32 that SNI wants */
++static BOOL pixels_from_icon(HICON hicon, unsigned char **ret_pixels, int *ret_width, int *ret_height)
++{
++    char buffer[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
++    BITMAPINFO *info = (BITMAPINFO *)buffer;
++    unsigned int *bits = NULL, count, i, j;
++    unsigned char *mask = NULL, *out;
++    BOOL has_alpha = FALSE, ret = FALSE;
++    ICONINFO ii;
++    BITMAP bm;
++    HDC hdc;
++
++    if (!NtUserGetIconInfo(hicon, &ii, NULL, NULL, NULL, 0)) return FALSE;
++    hdc = NtGdiCreateCompatibleDC(0);
++
++    if (!ii.hbmColor || !NtGdiExtGetObjectW(ii.hbmColor, sizeof(bm), &bm)) goto done;
++    if (bm.bmWidth <= 0 || bm.bmHeight <= 0 || bm.bmWidth > 1024 || bm.bmHeight > 1024) goto done;
++    count = bm.bmWidth * bm.bmHeight;
++
++    memset(&info->bmiHeader, 0, sizeof(info->bmiHeader));
++    info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
++    info->bmiHeader.biWidth = bm.bmWidth;
++    info->bmiHeader.biHeight = -bm.bmHeight;
++    info->bmiHeader.biPlanes = 1;
++    info->bmiHeader.biBitCount = 32;
++    info->bmiHeader.biCompression = BI_RGB;
++    info->bmiHeader.biSizeImage = count * 4;
++    if (!(bits = malloc(count * 4))) goto done;
++    if (!NtGdiGetDIBitsInternal(hdc, ii.hbmColor, 0, bm.bmHeight, bits, info, DIB_RGB_COLORS, 0, 0))
++        goto done;
++
++    for (i = 0; i < count; i++)
++        if ((has_alpha = (bits[i] & 0xff000000) != 0)) break;
++
++    if (!has_alpha)
++    {
++        /* generate the alpha channel from the mask */
++        unsigned int width_bytes = (bm.bmWidth + 31) / 32 * 4;
++
++        info->bmiHeader.biBitCount = 1;
++        info->bmiHeader.biSizeImage = width_bytes * bm.bmHeight;
++        if (!(mask = malloc(info->bmiHeader.biSizeImage))) goto done;
++        if (!NtGdiGetDIBitsInternal(hdc, ii.hbmMask, 0, bm.bmHeight, mask, info, DIB_RGB_COLORS, 0, 0))
++            goto done;
++        for (i = 0; i < bm.bmHeight; i++)
++            for (j = 0; j < bm.bmWidth; j++)
++                if (!((mask[i * width_bytes + j / 8] << (j % 8)) & 0x80))
++                    bits[i * bm.bmWidth + j] |= 0xff000000;
++    }
++
++    if (!(out = malloc(count * 4))) goto done;
++    for (i = 0; i < count; i++)
++    {
++        out[4 * i + 0] = bits[i] >> 24;
++        out[4 * i + 1] = bits[i] >> 16;
++        out[4 * i + 2] = bits[i] >> 8;
++        out[4 * i + 3] = bits[i];
++    }
++    *ret_pixels = out;
++    *ret_width = bm.bmWidth;
++    *ret_height = bm.bmHeight;
++    ret = TRUE;
++
++done:
++    free(bits);
++    free(mask);
++    NtGdiDeleteObjectApp(hdc);
++    if (ii.hbmColor) NtGdiDeleteObjectApp(ii.hbmColor);
++    if (ii.hbmMask) NtGdiDeleteObjectApp(ii.hbmMask);
++    return ret;
++}
++
++/* sni_mutex must be held */
++static struct sni_icon *get_icon(HWND owner, UINT id)
++{
++    struct sni_icon *icon;
++
++    LIST_FOR_EACH_ENTRY(icon, &sni_icons, struct sni_icon, entry)
++        if (!icon->deleted && icon->owner == owner && icon->id == id) return icon;
++    return NULL;
++}
++
++/* sni_mutex must be held. pixels/tip are taken over when used (set to NULL). */
++static void modify_icon(struct sni_icon *icon, const NOTIFYICONDATAW *nid,
++                        unsigned char **pixels, int width, int height, char **tip)
++{
++    if (nid->uFlags & NIF_STATE)
++    {
++        DWORD mask = nid->dwStateMask & NIS_HIDDEN;
++        BOOL hidden = (mask & nid->dwState) ? TRUE : (mask ? FALSE : icon->hidden);
++        if (hidden != icon->hidden)
++        {
++            icon->hidden = hidden;
++            icon->updates |= UPDATE_STATUS;
++        }
++    }
++    if (nid->uFlags & NIF_ICON)
++    {
++        free(icon->pixels);
++        icon->pixels = *pixels;
++        icon->width = width;
++        icon->height = height;
++        *pixels = NULL;
++        icon->updates |= UPDATE_ICON;
++    }
++    if (nid->uFlags & NIF_MESSAGE) icon->callback_message = nid->uCallbackMessage;
++    if ((nid->uFlags & NIF_TIP) && *tip)
++    {
++        free(icon->tip);
++        icon->tip = *tip;
++        *tip = NULL;
++        icon->updates |= UPDATE_TIP;
++    }
++}
++
++static BOOL wait_systray_thread(void)
++{
++    BOOL ret;
++
++    pthread_mutex_lock(&sni_mutex);
++    if (sni_state == SNI_STARTING)
++    {
++        struct timespec ts;
++        clock_gettime(CLOCK_REALTIME, &ts);
++        ts.tv_sec += 5;
++        while (sni_state == SNI_STARTING &&
++               pthread_cond_timedwait(&sni_cond, &sni_mutex, &ts) != ETIMEDOUT)
++            continue;
++    }
++    ret = sni_state == SNI_RUNNING;
++    pthread_mutex_unlock(&sni_mutex);
++    return ret;
++}
++
++/***********************************************************************
++ *           WAYLAND_NotifyIcon
++ *
++ * Called in the explorer process for each Shell_NotifyIcon. Returning -1
++ * makes explorer handle the icon itself (its own tray window).
++ */
++LRESULT WAYLAND_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *nid)
++{
++    unsigned char *pixels = NULL;
++    int width = 0, height = 0;
++    char *tip = NULL;
++    struct sni_icon *icon;
++    LRESULT ret = FALSE;
++
++    if (!wait_systray_thread()) return -1;
++
++    TRACE("msg %u hwnd %p id %#x flags %#x\n", msg, nid->hWnd, nid->uID, nid->uFlags);
++
++    if (msg == NIM_ADD || msg == NIM_MODIFY)
++    {
++        if ((nid->uFlags & NIF_ICON) && nid->hIcon &&
++            !pixels_from_icon(nid->hIcon, &pixels, &width, &height))
++            WARN("failed to convert icon %p\n", nid->hIcon);
++        if (nid->uFlags & NIF_TIP) tip = utf8_from_wstr(nid->szTip);
++    }
++
++    pthread_mutex_lock(&sni_mutex);
++    icon = get_icon(nid->hWnd, nid->uID);
++    switch (msg)
++    {
++    case NIM_ADD:
++        if (icon || !(icon = calloc(1, sizeof(*icon)))) break;
++        icon->owner = nid->hWnd;
++        icon->id = nid->uID;
++        icon->number = ++next_number;
++        modify_icon(icon, nid, &pixels, width, height, &tip);
++        icon->updates = 0;
++        list_add_tail(&sni_icons, &icon->entry);
++        ret = TRUE;
++        break;
++    case NIM_MODIFY:
++        if (!icon) break;
++        modify_icon(icon, nid, &pixels, width, height, &tip);
++        ret = TRUE;
++        break;
++    case NIM_DELETE:
++        if (!icon) break;
++        icon->deleted = TRUE;
++        ret = TRUE;
++        break;
++    case NIM_SETVERSION:
++        if (!icon) break;
++        icon->version = nid->uVersion;
++        ret = TRUE;
++        break;
++    case NIM_SETFOCUS:
++        ret = icon != NULL;
++        break;
++    default:
++        FIXME("unhandled msg %u\n", msg);
++        break;
++    }
++    pthread_mutex_unlock(&sni_mutex);
++
++    free(pixels);
++    free(tip);
++    wake_systray_thread();
++    return ret;
++}
++
++/***********************************************************************
++ *           WAYLAND_CleanupIcons
++ */
++void WAYLAND_CleanupIcons(HWND hwnd)
++{
++    struct sni_icon *icon;
++
++    if (sni_state != SNI_RUNNING) return;
++
++    pthread_mutex_lock(&sni_mutex);
++    LIST_FOR_EACH_ENTRY(icon, &sni_icons, struct sni_icon, entry)
++        if (icon->owner == hwnd) icon->deleted = TRUE;
++    pthread_mutex_unlock(&sni_mutex);
++    wake_systray_thread();
++}
++
++/* everything below runs in the systray thread */
++
++static BOOL notify_owner(HWND owner, UINT callback, UINT id, UINT version, UINT msg, POINT pt)
++{
++    WPARAM wp = id;
++    LPARAM lp = msg;
++
++    if (version >= NOTIFYICON_VERSION_4)
++    {
++        wp = MAKEWPARAM(pt.x, pt.y);
++        lp = MAKELPARAM(msg, id);
++    }
++
++    TRACE("posting %#x to %p id %#x\n", msg, owner, id);
++    if (!NtUserMessageCall(owner, callback, wp, lp, 0, NtUserSendNotifyMessage, FALSE) &&
++        RtlGetLastWin32Error() == ERROR_INVALID_WINDOW_HANDLE)
++        return FALSE;
++    return TRUE;
++}
++
++/* Emulate a click of a button on the icon: down is WM_[LRM]BUTTONDOWN or
++ * WM_[LRM]BUTTONDBLCLK (the second click of a double click), followed by the
++ * button up, like explorer's own tray window does. */
++static void click_icon(struct sni_icon *icon, UINT down, int x, int y)
++{
++    HWND desktop = NtUserGetDesktopWindow();
++    DWORD pid = 0, time;
++    UINT callback, id, version, up;
++    HWND owner;
++    POINT pt;
++
++    switch (down)
++    {
++    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: up = WM_LBUTTONUP; break;
++    case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: up = WM_RBUTTONUP; break;
++    default: up = WM_MBUTTONUP; break;
++    }
++
++    pthread_mutex_lock(&sni_mutex);
++    owner = icon->owner;
++    callback = icon->callback_message;
++    id = icon->id;
++    version = icon->version;
++    pthread_mutex_unlock(&sni_mutex);
++
++    if (!callback || !down) return;
++    NtUserGetCursorPos(&pt);
++
++    /* let the owner process place its menu where the tray was clicked */
++    NtUserGetWindowThread(owner, &pid);
++    if (!(time = NtGetTickCount())) time = 1;
++    NtUserSetProp(desktop, click_pid_prop, ULongToHandle(pid));
++    NtUserSetProp(desktop, click_pos_prop, ULongToHandle(MAKELONG(x, y)));
++    NtUserSetProp(desktop, click_time_prop, ULongToHandle(time));
++
++    TRACE("icon %p msg %#x at %d,%d time %u\n", icon, down, x, y, (unsigned int)time);
++
++    if (!notify_owner(owner, callback, id, version, down, pt)) goto destroyed;
++    notify_owner(owner, callback, id, version, up, pt);
++    if (version)
++    {
++        if (up == WM_LBUTTONUP) notify_owner(owner, callback, id, version, NIN_SELECT, pt);
++        if (up == WM_RBUTTONUP) notify_owner(owner, callback, id, version, WM_CONTEXTMENU, pt);
++    }
++    return;
++
++destroyed:
++    WARN("window %p was destroyed, removing icon %#x\n", owner, id);
++    pthread_mutex_lock(&sni_mutex);
++    icon->deleted = TRUE;
++    pthread_mutex_unlock(&sni_mutex);
++}
++
++/* The host only says "activated" for each click: turn a second activation
++ * within the double click time into a double click, like Windows does. */
++static UINT activate_message(struct sni_icon *icon, UINT down, UINT dblclk)
++{
++    static struct sni_icon *last_icon;
++    static UINT last_msg;
++    static DWORD last_time;
++    DWORD now = NtGetTickCount();
++    UINT msg = down;
++
++    /* GTK hosts (waybar) activate on the second press and again on its
++     * double click event, at the same time: ignore that duplicate. */
++    if (icon == last_icon && (last_msg == down || last_msg == dblclk) && now - last_time < 50)
++        return 0;
++    if (icon == last_icon && last_msg == down && now - last_time <= NtUserGetDoubleClickTime())
++        msg = dblclk;
++    last_icon = icon;
++    last_msg = msg;
++    last_time = now;
++    return msg;
++}
++
++static void append_variant_string(DBusMessageIter *iter, const char *str)
++{
++    DBusMessageIter var;
++
++    dbus_message_iter_open_container(iter, DBUS_TYPE_VARIANT, "s", &var);
++    dbus_message_iter_append_basic(&var, DBUS_TYPE_STRING, &str);
++    dbus_message_iter_close_container(iter, &var);
++}
++
++/* appends an a(iiay) */
++static void append_pixmaps(DBusMessageIter *iter, const struct sni_icon *icon)
++{
++    DBusMessageIter array, st, bytes;
++
++    dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY, "(iiay)", &array);
++    if (icon && icon->pixels)
++    {
++        const unsigned char *data = icon->pixels;
++        dbus_int32_t width = icon->width, height = icon->height;
++
++        dbus_message_iter_open_container(&array, DBUS_TYPE_STRUCT, NULL, &st);
++        dbus_message_iter_append_basic(&st, DBUS_TYPE_INT32, &width);
++        dbus_message_iter_append_basic(&st, DBUS_TYPE_INT32, &height);
++        dbus_message_iter_open_container(&st, DBUS_TYPE_ARRAY, "y", &bytes);
++        dbus_message_iter_append_fixed_array(&bytes, DBUS_TYPE_BYTE, &data, width * height * 4);
++        dbus_message_iter_close_container(&st, &bytes);
++        dbus_message_iter_close_container(&array, &st);
++    }
++    dbus_message_iter_close_container(iter, &array);
++}
++
++static const char *item_properties[] =
++{
++    "Category", "Id", "Title", "Status", "WindowId", "IconName", "IconPixmap",
++    "OverlayIconName", "AttentionIconName", "AttentionMovieName", "ToolTip", "ItemIsMenu",
++};
++
++/* appends the property as a variant. sni_mutex must be held. */
++static BOOL append_property(DBusMessageIter *iter, const struct sni_icon *icon, const char *name)
++{
++    DBusMessageIter var, st;
++
++    if (!strcmp(name, "Category")) append_variant_string(iter, "ApplicationStatus");
++    else if (!strcmp(name, "Id"))
++    {
++        char id[32];
++        snprintf(id, sizeof(id), "wine-tray-%u", icon->number);
++        append_variant_string(iter, id);
++    }
++    else if (!strcmp(name, "Title")) append_variant_string(iter, icon->tip ? icon->tip : "");
++    else if (!strcmp(name, "Status")) append_variant_string(iter, icon->hidden ? "Passive" : "Active");
++    else if (!strcmp(name, "WindowId"))
++    {
++        dbus_int32_t zero = 0;
++        dbus_message_iter_open_container(iter, DBUS_TYPE_VARIANT, "i", &var);
++        dbus_message_iter_append_basic(&var, DBUS_TYPE_INT32, &zero);
++        dbus_message_iter_close_container(iter, &var);
++    }
++    else if (!strcmp(name, "IconName") || !strcmp(name, "OverlayIconName") ||
++             !strcmp(name, "AttentionIconName") || !strcmp(name, "AttentionMovieName"))
++        append_variant_string(iter, "");
++    else if (!strcmp(name, "IconPixmap"))
++    {
++        dbus_message_iter_open_container(iter, DBUS_TYPE_VARIANT, "a(iiay)", &var);
++        append_pixmaps(&var, icon);
++        dbus_message_iter_close_container(iter, &var);
++    }
++    else if (!strcmp(name, "ToolTip"))
++    {
++        const char *empty = "", *tip = icon->tip ? icon->tip : "";
++
++        dbus_message_iter_open_container(iter, DBUS_TYPE_VARIANT, "(sa(iiay)ss)", &var);
++        dbus_message_iter_open_container(&var, DBUS_TYPE_STRUCT, NULL, &st);
++        dbus_message_iter_append_basic(&st, DBUS_TYPE_STRING, &empty);
++        append_pixmaps(&st, NULL);
++        dbus_message_iter_append_basic(&st, DBUS_TYPE_STRING, &tip);
++        dbus_message_iter_append_basic(&st, DBUS_TYPE_STRING, &empty);
++        dbus_message_iter_close_container(&var, &st);
++        dbus_message_iter_close_container(iter, &var);
++    }
++    else if (!strcmp(name, "ItemIsMenu"))
++    {
++        dbus_bool_t no = FALSE;
++        dbus_message_iter_open_container(iter, DBUS_TYPE_VARIANT, "b", &var);
++        dbus_message_iter_append_basic(&var, DBUS_TYPE_BOOLEAN, &no);
++        dbus_message_iter_close_container(iter, &var);
++    }
++    else return FALSE;
++    return TRUE;
++}
++
++static const char introspect_xml[] =
++    DBUS_INTROSPECT_1_0_XML_DOCTYPE_DECL_NODE
++    "<node>\n"
++    "  <interface name=\"" ITEM_IFACE "\">\n"
++    "    <property name=\"Category\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"Id\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"Title\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"Status\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"WindowId\" type=\"i\" access=\"read\"/>\n"
++    "    <property name=\"IconName\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"IconPixmap\" type=\"a(iiay)\" access=\"read\"/>\n"
++    "    <property name=\"OverlayIconName\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"AttentionIconName\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"AttentionMovieName\" type=\"s\" access=\"read\"/>\n"
++    "    <property name=\"ToolTip\" type=\"(sa(iiay)ss)\" access=\"read\"/>\n"
++    "    <property name=\"ItemIsMenu\" type=\"b\" access=\"read\"/>\n"
++    "    <method name=\"ContextMenu\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n"
++    "    <method name=\"Activate\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n"
++    "    <method name=\"SecondaryActivate\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n"
++    "    <method name=\"Scroll\"><arg name=\"delta\" type=\"i\" direction=\"in\"/><arg name=\"orientation\" type=\"s\" direction=\"in\"/></method>\n"
++    "    <signal name=\"NewTitle\"/>\n"
++    "    <signal name=\"NewIcon\"/>\n"
++    "    <signal name=\"NewToolTip\"/>\n"
++    "    <signal name=\"NewStatus\"><arg name=\"status\" type=\"s\"/></signal>\n"
++    "  </interface>\n"
++    "  <interface name=\"" PROPS_IFACE "\">\n"
++    "    <method name=\"Get\"><arg type=\"s\" direction=\"in\"/><arg type=\"s\" direction=\"in\"/><arg type=\"v\" direction=\"out\"/></method>\n"
++    "    <method name=\"GetAll\"><arg type=\"s\" direction=\"in\"/><arg type=\"a{sv}\" direction=\"out\"/></method>\n"
++    "  </interface>\n"
++    "  <interface name=\"" INTROSPECT_IFACE "\">\n"
++    "    <method name=\"Introspect\"><arg type=\"s\" direction=\"out\"/></method>\n"
++    "  </interface>\n"
++    "</node>\n";
++
++/* like dbus_message_is_method_call, but also accepts calls without interface */
++static BOOL is_call(DBusMessage *msg, const char *iface, const char *member)
++{
++    const char *msg_iface = dbus_message_get_interface(msg);
++    const char *msg_member = dbus_message_get_member(msg);
++
++    if (!msg_member || strcmp(msg_member, member)) return FALSE;
++    return !msg_iface || !strcmp(msg_iface, iface);
++}
++
++static DBusHandlerResult item_message(DBusConnection *conn, DBusMessage *msg, void *user_data)
++{
++    struct sni_icon *icon = user_data;
++    dbus_int32_t x = 0, y = 0;
++    DBusMessage *reply = NULL;
++    DBusMessageIter iter, array, entry;
++    const char *iface, *name;
++    unsigned int i;
++
++    if (dbus_message_get_type(msg) != DBUS_MESSAGE_TYPE_METHOD_CALL)
++        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
++
++    TRACE("icon %p %s.%s\n", icon, debugstr_a(dbus_message_get_interface(msg)),
++          debugstr_a(dbus_message_get_member(msg)));
++
++    if (is_call(msg, ITEM_IFACE, "Activate"))
++    {
++        dbus_message_get_args(msg, NULL, DBUS_TYPE_INT32, &x, DBUS_TYPE_INT32, &y, DBUS_TYPE_INVALID);
++        click_icon(icon, activate_message(icon, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK), x, y);
++        reply = dbus_message_new_method_return(msg);
++    }
++    else if (is_call(msg, ITEM_IFACE, "SecondaryActivate"))
++    {
++        /* middle click */
++        dbus_message_get_args(msg, NULL, DBUS_TYPE_INT32, &x, DBUS_TYPE_INT32, &y, DBUS_TYPE_INVALID);
++        click_icon(icon, activate_message(icon, WM_MBUTTONDOWN, WM_MBUTTONDBLCLK), x, y);
++        reply = dbus_message_new_method_return(msg);
++    }
++    else if (is_call(msg, ITEM_IFACE, "ContextMenu"))
++    {
++        dbus_message_get_args(msg, NULL, DBUS_TYPE_INT32, &x, DBUS_TYPE_INT32, &y, DBUS_TYPE_INVALID);
++        click_icon(icon, activate_message(icon, WM_RBUTTONDOWN, WM_RBUTTONDBLCLK), x, y);
++        reply = dbus_message_new_method_return(msg);
++    }
++    else if (is_call(msg, ITEM_IFACE, "Scroll") || is_call(msg, ITEM_IFACE, "ProvideXdgActivationToken"))
++    {
++        reply = dbus_message_new_method_return(msg);
++    }
++    else if (is_call(msg, PROPS_IFACE, "Get"))
++    {
++        if (!dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &iface, DBUS_TYPE_STRING, &name,
++                                   DBUS_TYPE_INVALID))
++            reply = dbus_message_new_error(msg, DBUS_ERROR_INVALID_ARGS, NULL);
++        else if (!(reply = dbus_message_new_method_return(msg)))
++            return DBUS_HANDLER_RESULT_NEED_MEMORY;
++        else
++        {
++            BOOL found;
++
++            dbus_message_iter_init_append(reply, &iter);
++            pthread_mutex_lock(&sni_mutex);
++            found = !strcmp(iface, ITEM_IFACE) && append_property(&iter, icon, name);
++            pthread_mutex_unlock(&sni_mutex);
++            if (!found)
++            {
++                dbus_message_unref(reply);
++                reply = dbus_message_new_error(msg, DBUS_ERROR_UNKNOWN_PROPERTY, name);
++            }
++        }
++    }
++    else if (is_call(msg, PROPS_IFACE, "GetAll"))
++    {
++        if (!dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &iface, DBUS_TYPE_INVALID))
++            reply = dbus_message_new_error(msg, DBUS_ERROR_INVALID_ARGS, NULL);
++        else if (!(reply = dbus_message_new_method_return(msg)))
++            return DBUS_HANDLER_RESULT_NEED_MEMORY;
++        else
++        {
++            dbus_message_iter_init_append(reply, &iter);
++            dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &array);
++            if (!strcmp(iface, ITEM_IFACE))
++            {
++                pthread_mutex_lock(&sni_mutex);
++                for (i = 0; i < ARRAY_SIZE(item_properties); i++)
++                {
++                    dbus_message_iter_open_container(&array, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
++                    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &item_properties[i]);
++                    append_property(&entry, icon, item_properties[i]);
++                    dbus_message_iter_close_container(&array, &entry);
++                }
++                pthread_mutex_unlock(&sni_mutex);
++            }
++            dbus_message_iter_close_container(&iter, &array);
++        }
++    }
++    else if (is_call(msg, PROPS_IFACE, "Set"))
++    {
++        reply = dbus_message_new_error(msg, DBUS_ERROR_PROPERTY_READ_ONLY, NULL);
++    }
++    else if (is_call(msg, INTROSPECT_IFACE, "Introspect"))
++    {
++        const char *xml = introspect_xml;
++        if ((reply = dbus_message_new_method_return(msg)))
++            dbus_message_append_args(reply, DBUS_TYPE_STRING, &xml, DBUS_TYPE_INVALID);
++    }
++    else return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
++
++    if (!reply) return DBUS_HANDLER_RESULT_NEED_MEMORY;
++    dbus_connection_send(conn, reply, NULL);
++    dbus_message_unref(reply);
++    return DBUS_HANDLER_RESULT_HANDLED;
++}
++
++static const DBusObjectPathVTable item_vtable = { .message_function = item_message };
++
++static void register_icon(struct sni_icon *icon)
++{
++    const char *name = icon->bus_name;
++    DBusMessage *msg;
++
++    if (!watcher_present) return;
++    TRACE("registering %s\n", name);
++    if (!(msg = dbus_message_new_method_call(WATCHER_NAME, WATCHER_PATH, WATCHER_NAME,
++                                             "RegisterStatusNotifierItem")))
++        return;
++    dbus_message_append_args(msg, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID);
++    dbus_message_set_no_reply(msg, TRUE);
++    dbus_connection_send(icon->conn, msg, NULL);
++    dbus_message_unref(msg);
++}
++
++static void emit_signal(struct sni_icon *icon, const char *signal, const char *status)
++{
++    DBusMessage *msg;
++
++    if (!(msg = dbus_message_new_signal(ITEM_PATH, ITEM_IFACE, signal))) return;
++    if (status) dbus_message_append_args(msg, DBUS_TYPE_STRING, &status, DBUS_TYPE_INVALID);
++    dbus_connection_send(icon->conn, msg, NULL);
++    dbus_message_unref(msg);
++}
++
++static void disconnect_icon(struct sni_icon *icon)
++{
++    if (!icon->conn) return;
++    dbus_connection_close(icon->conn);
++    dbus_connection_unref(icon->conn);
++    icon->conn = NULL;
++}
++
++static BOOL connect_icon(struct sni_icon *icon)
++{
++    DBusConnection *conn;
++    DBusError err;
++    int ret;
++
++    dbus_error_init(&err);
++    if (!(conn = dbus_bus_get_private(DBUS_BUS_SESSION, &err)))
++    {
++        WARN("failed to connect to the session bus: %s\n", debugstr_a(err.message));
++        dbus_error_free(&err);
++        return FALSE;
++    }
++    dbus_connection_set_exit_on_disconnect(conn, FALSE);
++    icon->conn = conn;
++
++    if (!dbus_connection_register_object_path(conn, ITEM_PATH, &item_vtable, icon))
++        goto failed;
++
++    snprintf(icon->bus_name, sizeof(icon->bus_name), "org.kde.StatusNotifierItem-%d-%u",
++             (int)getpid(), icon->number);
++    ret = dbus_bus_request_name(conn, icon->bus_name, DBUS_NAME_FLAG_DO_NOT_QUEUE, &err);
++    if (ret != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER)
++    {
++        WARN("failed to own %s: %s\n", icon->bus_name, debugstr_a(err.message));
++        dbus_error_free(&err);
++        goto failed;
++    }
++
++    TRACE("icon %p (hwnd %p id %#x) is %s\n", icon, icon->owner, icon->id, icon->bus_name);
++    register_icon(icon);
++    return TRUE;
++
++failed:
++    disconnect_icon(icon);
++    return FALSE;
++}
++
++static DBusHandlerResult main_filter(DBusConnection *conn, DBusMessage *msg, void *user_data)
++{
++    const char *name, *old_owner, *new_owner;
++
++    if (dbus_message_is_signal(msg, DBUS_INTERFACE_DBUS, "NameOwnerChanged") &&
++        dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING, &old_owner,
++                              DBUS_TYPE_STRING, &new_owner, DBUS_TYPE_INVALID) &&
++        !strcmp(name, WATCHER_NAME))
++    {
++        TRACE("watcher owner %s -> %s\n", debugstr_a(old_owner), debugstr_a(new_owner));
++        watcher_present = new_owner[0] != 0;
++        if (watcher_present) reregister_all = TRUE;
++    }
++    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
++}
++
++static void dispatch_connection(DBusConnection *conn)
++{
++    dbus_connection_read_write(conn, 0);
++    while (dbus_connection_dispatch(conn) == DBUS_DISPATCH_DATA_REMAINS) continue;
++}
++
++/* sync the icons with their D-Bus objects. Returns the icons that have a connection. */
++static unsigned int update_icons(struct sni_icon ***ret_icons, unsigned int *capacity)
++{
++    struct sni_icon *icon, *next, **icons = *ret_icons;
++    unsigned int count = 0, updates;
++    BOOL deleted, hidden;
++
++    pthread_mutex_lock(&sni_mutex);
++    LIST_FOR_EACH_ENTRY_SAFE(icon, next, &sni_icons, struct sni_icon, entry)
++    {
++        if (!icon->deleted && !NtUserIsWindow(icon->owner))
++        {
++            WARN("window %p was destroyed, removing icon %#x\n", icon->owner, icon->id);
++            icon->deleted = TRUE;
++        }
++        updates = icon->updates;
++        icon->updates = 0;
++        deleted = icon->deleted;
++        hidden = icon->hidden;
++        if (deleted) list_remove(&icon->entry);
++        pthread_mutex_unlock(&sni_mutex);
++
++        /* the icon can't be freed by anyone else, so it's safe to use it unlocked */
++        if (deleted)
++        {
++            TRACE("removing icon %p %s\n", icon, icon->bus_name);
++            disconnect_icon(icon);
++            free(icon->pixels);
++            free(icon->tip);
++            free(icon);
++        }
++        else
++        {
++            if (icon->conn && !dbus_connection_get_is_connected(icon->conn)) disconnect_icon(icon);
++            if (!icon->conn)
++                connect_icon(icon); /* the host fetches everything, no signals needed */
++            else
++            {
++                if (reregister_all) register_icon(icon);
++                if (updates & UPDATE_ICON) emit_signal(icon, "NewIcon", NULL);
++                if (updates & UPDATE_TIP)
++                {
++                    emit_signal(icon, "NewToolTip", NULL);
++                    emit_signal(icon, "NewTitle", NULL);
++                }
++                if (updates & UPDATE_STATUS) emit_signal(icon, "NewStatus", hidden ? "Passive" : "Active");
++            }
++            if (icon->conn)
++            {
++                if (count == *capacity)
++                {
++                    unsigned int new_capacity = max(8, *capacity * 2);
++                    struct sni_icon **tmp = realloc(icons, new_capacity * sizeof(*icons));
++                    if (!tmp) goto next;
++                    icons = *ret_icons = tmp;
++                    *capacity = new_capacity;
++                }
++                icons[count++] = icon;
++            }
++        }
++    next:
++        pthread_mutex_lock(&sni_mutex);
++    }
++    pthread_mutex_unlock(&sni_mutex);
++    reregister_all = FALSE;
++    return count;
++}
++
++/***********************************************************************
++ *           waylanddrv_unix_systray_init
++ *
++ * Called from DllMain. Succeeds if this process should run the systray thread.
++ */
++NTSTATUS waylanddrv_unix_systray_init(void *arg)
++{
++    const char *env = getenv("WINE_WAYLAND_SNI");
++
++    if (!process_name || strcmp(process_name, "explorer.exe")) return STATUS_NOT_SUPPORTED;
++    if (env && !strcmp(env, "0")) return STATUS_NOT_SUPPORTED;
++    if (pipe2(wake_pipe, O_CLOEXEC | O_NONBLOCK)) return STATUS_UNSUCCESSFUL;
++    dbus_threads_init_default();
++    sni_state = SNI_STARTING;
++    return STATUS_SUCCESS;
++}
++
++/***********************************************************************
++ *           waylanddrv_unix_systray_run
++ *
++ * The systray thread: owns all D-Bus connections.
++ */
++NTSTATUS waylanddrv_unix_systray_run(void *arg)
++{
++    struct sni_icon **icons = NULL;
++    unsigned int count, capacity = 0, i;
++    struct pollfd *fds = NULL;
++    DBusError err;
++    int fd;
++    char buf[64];
++
++    dbus_error_init(&err);
++    if ((main_conn = dbus_bus_get_private(DBUS_BUS_SESSION, &err)))
++    {
++        dbus_connection_set_exit_on_disconnect(main_conn, FALSE);
++        dbus_connection_add_filter(main_conn, main_filter, NULL, NULL);
++        dbus_bus_add_match(main_conn, "type='signal',sender='" DBUS_SERVICE_DBUS "',interface='"
++                           DBUS_INTERFACE_DBUS "',member='NameOwnerChanged',arg0='" WATCHER_NAME "'",
++                           NULL);
++        watcher_present = dbus_bus_name_has_owner(main_conn, WATCHER_NAME, NULL);
++        TRACE("connected, watcher present %d\n", watcher_present);
++    }
++    else
++    {
++        WARN("no session bus, using explorer's tray: %s\n", debugstr_a(err.message));
++        dbus_error_free(&err);
++    }
++
++    pthread_mutex_lock(&sni_mutex);
++    sni_state = main_conn ? SNI_RUNNING : SNI_DISABLED;
++    pthread_cond_broadcast(&sni_cond);
++    pthread_mutex_unlock(&sni_mutex);
++    if (!main_conn) return STATUS_UNSUCCESSFUL;
++
++    for (;;)
++    {
++        dispatch_connection(main_conn);
++        count = update_icons(&icons, &capacity);
++        for (i = 0; i < count; i++) dispatch_connection(icons[i]->conn);
++
++        free(fds);
++        if (!(fds = calloc(count + 2, sizeof(*fds)))) return STATUS_NO_MEMORY;
++        fds[0].fd = wake_pipe[0];
++        fds[0].events = POLLIN;
++        fds[1].fd = dbus_connection_get_unix_fd(main_conn, &fd) ? fd : -1;
++        fds[1].events = POLLIN | (dbus_connection_has_messages_to_send(main_conn) ? POLLOUT : 0);
++        for (i = 0; i < count; i++)
++        {
++            fds[i + 2].fd = dbus_connection_get_unix_fd(icons[i]->conn, &fd) ? fd : -1;
++            fds[i + 2].events = POLLIN | (dbus_connection_has_messages_to_send(icons[i]->conn) ? POLLOUT : 0);
++        }
++
++        /* wake up regularly to notice icons of windows that went away */
++        if (poll(fds, count + 2, 2000) < 0 && errno != EINTR) break;
++        while (read(wake_pipe[0], buf, sizeof(buf)) > 0) continue;
++    }
++
++    ERR("poll failed: %s\n", strerror(errno));
++    return STATUS_UNSUCCESSFUL;
++}
++
++#else /* SONAME_LIBDBUS_1 */
++
++LRESULT WAYLAND_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *nid)
++{
++    return -1;
++}
++
++void WAYLAND_CleanupIcons(HWND hwnd)
++{
++}
++
++NTSTATUS waylanddrv_unix_systray_init(void *arg)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++NTSTATUS waylanddrv_unix_systray_run(void *arg)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++#endif /* SONAME_LIBDBUS_1 */
+diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
+index 1cb525b..c803e30 100644
+--- a/dlls/winewayland.drv/waylanddrv.h
++++ b/dlls/winewayland.drv/waylanddrv.h
+@@ -37,6 +37,7 @@
+ #include "xdg-output-unstable-v1-client-protocol.h"
+ #include "xdg-shell-client-protocol.h"
+ #include "wlr-data-control-unstable-v1-client-protocol.h"
++#include "wlr-layer-shell-unstable-v1-client-protocol.h"
+ #include "xdg-toplevel-icon-v1-client-protocol.h"
+ #include "pointer-warp-v1-client-protocol.h"
+ #include "alpha-modifier-v1-client-protocol.h"
+@@ -86,6 +87,7 @@ enum wayland_surface_role
+     WAYLAND_SURFACE_ROLE_NONE,
+     WAYLAND_SURFACE_ROLE_TOPLEVEL,
+     WAYLAND_SURFACE_ROLE_SUBSURFACE,
++    WAYLAND_SURFACE_ROLE_LAYER, /* tray menu, see wayland_systray.c */
+ };
+ 
+ struct wayland_keyboard
+@@ -113,6 +115,7 @@ struct wayland_pointer
+     struct zwp_relative_pointer_v1 *zwp_relative_pointer_v1;
+     struct wp_cursor_shape_device_v1 *wp_cursor_shape_device_v1;
+     HWND focused_hwnd;
++    BOOL focused_catcher; /* focused_hwnd's tray menu click catcher */
+     HWND constraint_hwnd;
+     BOOL relative_mode;
+     BOOL pending_warp;
+@@ -181,6 +184,7 @@ struct wayland
+     struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager_v1;
+     struct zwp_text_input_manager_v3 *zwp_text_input_manager_v3;
+     struct zwlr_data_control_manager_v1 *zwlr_data_control_manager_v1;
++    struct zwlr_layer_shell_v1 *zwlr_layer_shell_v1;
+     struct wl_data_device_manager *wl_data_device_manager;
+     struct xdg_toplevel_icon_manager_v1 *xdg_toplevel_icon_manager_v1;
+     struct wp_cursor_shape_manager_v1 *wp_cursor_shape_manager_v1;
+@@ -300,6 +304,19 @@ struct wayland_surface
+             struct wl_subsurface *wl_subsurface;
+             HWND owner_hwnd;
+         };
++        struct
++        {
++            struct zwlr_layer_surface_v1 *layer_surface;
++            POINT layer_pos;       /* requested position, output-local logical coords */
++            RECT layer_output;     /* logical rect of the output */
++            int layer_width, layer_height;
++            BOOL layer_committed;  /* initial commit done */
++            /* transparent surface below the menu, catching clicks outside of it */
++            struct wl_surface *catcher_surface;
++            struct zwlr_layer_surface_v1 *catcher_layer;
++            struct wp_viewport *catcher_viewport;
++            struct wayland_shm_buffer *catcher_buffer;
++        };
+     };
+     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
+ 
+@@ -315,6 +332,9 @@ struct wayland_surface
+  */
+ 
+ BOOL wayland_process_init(void);
++NTSTATUS waylanddrv_unix_systray_init(void *arg);
++BOOL wayland_systray_take_menu_pos(POINT *pos);
++NTSTATUS waylanddrv_unix_systray_run(void *arg);
+ 
+ /**********************************************************************
+  *          Wayland output
+@@ -334,6 +354,8 @@ void color_management_init(void);
+ struct wayland_surface *wayland_surface_create(HWND hwnd);
+ void wayland_surface_destroy(struct wayland_surface *surface);
+ void wayland_surface_make_toplevel(struct wayland_surface *surface);
++void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos);
++BOOL wayland_surface_is_catcher(struct wl_surface *wl_surface);
+ void wayland_surface_make_subsurface(struct wayland_surface *surface,
+                                      struct wayland_surface *parent);
+ void wayland_surface_clear_role(struct wayland_surface *surface);
+@@ -459,6 +481,8 @@ RGNDATA *get_region_data(HRGN region);
+  */
+ 
+ LRESULT WAYLAND_ClipboardWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
++void WAYLAND_CleanupIcons(HWND hwnd);
++LRESULT WAYLAND_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *data);
+ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset);
+ LRESULT WAYLAND_DesktopWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+ void WAYLAND_DestroyWindow(HWND hwnd);
+diff --git a/dlls/winewayland.drv/waylanddrv_main.c b/dlls/winewayland.drv/waylanddrv_main.c
+index 275a390..2f7c6d0 100644
+--- a/dlls/winewayland.drv/waylanddrv_main.c
++++ b/dlls/winewayland.drv/waylanddrv_main.c
+@@ -35,11 +35,13 @@ char *process_name = NULL;
+ static const struct user_driver_funcs waylanddrv_funcs =
+ {
+     .pClipboardWindowProc = WAYLAND_ClipboardWindowProc,
++    .pCleanupIcons = WAYLAND_CleanupIcons,
+     .pClipCursor = WAYLAND_ClipCursor,
+     .pDesktopWindowProc = WAYLAND_DesktopWindowProc,
+     .pDestroyWindow = WAYLAND_DestroyWindow,
+     .pSetIMECompositionRect = WAYLAND_SetIMECompositionRect,
+     .pKbdLayerDescriptor = WAYLAND_KbdLayerDescriptor,
++    .pNotifyIcon = WAYLAND_NotifyIcon,
+     .pReleaseKbdTables = WAYLAND_ReleaseKbdTables,
+     .pSetCursor = WAYLAND_SetCursor,
+     .pSetCursorPos = WAYLAND_SetCursorPos,
+@@ -128,6 +130,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+     waylanddrv_unix_init,
+     waylanddrv_unix_read_events,
+     waylanddrv_unix_init_clipboard,
++    waylanddrv_unix_systray_init,
++    waylanddrv_unix_systray_run,
+ };
+ 
+ C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == waylanddrv_unix_func_count);
+@@ -139,6 +143,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+     waylanddrv_unix_init,
+     waylanddrv_unix_read_events,
+     waylanddrv_unix_init_clipboard,
++    waylanddrv_unix_systray_init,
++    waylanddrv_unix_systray_run,
+ };
+ 
+ C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == waylanddrv_unix_func_count);
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 7a24275..68f9cf7 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -176,6 +176,7 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
+ {
+     struct wayland_surface *surface;
+     enum wayland_surface_role role;
++    POINT layer_pos = {0};
+     BOOL visible;
+     DWORD exstyle = NtUserGetWindowLongW(data->hwnd, GWL_EXSTYLE);
+     struct wl_region *input_region;
+@@ -186,6 +187,15 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
+                (!(exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
+ 
+     if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
++    /* the first popup shown right after a tray icon click (the tray menu) is
++     * placed where the tray was clicked, as a layer surface */
++    else if (data->wayland_surface && data->wayland_surface->role == WAYLAND_SURFACE_ROLE_LAYER &&
++             data->wayland_surface->layer_surface)
++        role = WAYLAND_SURFACE_ROLE_LAYER;
++    else if (!data->managed && process_wayland.zwlr_layer_shell_v1 &&
++             (NtUserGetWindowLongW(data->hwnd, GWL_STYLE) & WS_POPUP) &&
++             wayland_systray_take_menu_pos(&layer_pos))
++        role = WAYLAND_SURFACE_ROLE_LAYER;
+     else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
+     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
+ 
+@@ -224,6 +234,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
+     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
+         wayland_surface_make_subsurface(surface, owner_surface);
+         break;
++    case WAYLAND_SURFACE_ROLE_LAYER:
++        wayland_surface_make_layer(surface, layer_pos);
++        break;
+     }
+ 
+     wayland_win_data_get_config(data, &surface->window);
+@@ -309,6 +322,8 @@ static void wayland_win_data_update_wayland_state(struct wayland_win_data *data)
+         surface->processing.serial = 1;
+         surface->processing.processed = TRUE;
+         break;
++    case WAYLAND_SURFACE_ROLE_LAYER:
++        break;
+     }
+ 
+     wl_display_flush(process_wayland.wl_display);
+diff --git a/dlls/winewayland.drv/wlr-layer-shell-unstable-v1.xml b/dlls/winewayland.drv/wlr-layer-shell-unstable-v1.xml
+new file mode 100644
+index 0000000..d62fd51
+--- /dev/null
++++ b/dlls/winewayland.drv/wlr-layer-shell-unstable-v1.xml
+@@ -0,0 +1,390 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="wlr_layer_shell_unstable_v1">
++  <copyright>
++    Copyright © 2017 Drew DeVault
++
++    Permission to use, copy, modify, distribute, and sell this
++    software and its documentation for any purpose is hereby granted
++    without fee, provided that the above copyright notice appear in
++    all copies and that both that copyright notice and this permission
++    notice appear in supporting documentation, and that the name of
++    the copyright holders not be used in advertising or publicity
++    pertaining to distribution of the software without specific,
++    written prior permission.  The copyright holders make no
++    representations about the suitability of this software for any
++    purpose.  It is provided "as is" without express or implied
++    warranty.
++
++    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
++    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
++    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
++    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
++    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
++    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
++    THIS SOFTWARE.
++  </copyright>
++
++  <interface name="zwlr_layer_shell_v1" version="4">
++    <description summary="create surfaces that are layers of the desktop">
++      Clients can use this interface to assign the surface_layer role to
++      wl_surfaces. Such surfaces are assigned to a "layer" of the output and
++      rendered with a defined z-depth respective to each other. They may also be
++      anchored to the edges and corners of a screen and specify input handling
++      semantics. This interface should be suitable for the implementation of
++      many desktop shell components, and a broad number of other applications
++      that interact with the desktop.
++    </description>
++
++    <request name="get_layer_surface">
++      <description summary="create a layer_surface from a surface">
++        Create a layer surface for an existing surface. This assigns the role of
++        layer_surface, or raises a protocol error if another role is already
++        assigned.
++
++        Creating a layer surface from a wl_surface which has a buffer attached
++        or committed is a client error, and any attempts by a client to attach
++        or manipulate a buffer prior to the first layer_surface.configure call
++        must also be treated as errors.
++
++        After creating a layer_surface object and setting it up, the client
++        must perform an initial commit without any buffer attached.
++        The compositor will reply with a layer_surface.configure event.
++        The client must acknowledge it and is then allowed to attach a buffer
++        to map the surface.
++
++        You may pass NULL for output to allow the compositor to decide which
++        output to use. Generally this will be the one that the user most
++        recently interacted with.
++
++        Clients can specify a namespace that defines the purpose of the layer
++        surface.
++      </description>
++      <arg name="id" type="new_id" interface="zwlr_layer_surface_v1"/>
++      <arg name="surface" type="object" interface="wl_surface"/>
++      <arg name="output" type="object" interface="wl_output" allow-null="true"/>
++      <arg name="layer" type="uint" enum="layer" summary="layer to add this surface to"/>
++      <arg name="namespace" type="string" summary="namespace for the layer surface"/>
++    </request>
++
++    <enum name="error">
++      <entry name="role" value="0" summary="wl_surface has another role"/>
++      <entry name="invalid_layer" value="1" summary="layer value is invalid"/>
++      <entry name="already_constructed" value="2" summary="wl_surface has a buffer attached or committed"/>
++    </enum>
++
++    <enum name="layer">
++      <description summary="available layers for surfaces">
++        These values indicate which layers a surface can be rendered in. They
++        are ordered by z depth, bottom-most first. Traditional shell surfaces
++        will typically be rendered between the bottom and top layers.
++        Fullscreen shell surfaces are typically rendered at the top layer.
++        Multiple surfaces can share a single layer, and ordering within a
++        single layer is undefined.
++      </description>
++
++      <entry name="background" value="0"/>
++      <entry name="bottom" value="1"/>
++      <entry name="top" value="2"/>
++      <entry name="overlay" value="3"/>
++    </enum>
++
++    <!-- Version 3 additions -->
++
++    <request name="destroy" type="destructor" since="3">
++      <description summary="destroy the layer_shell object">
++        This request indicates that the client will not use the layer_shell
++        object any more. Objects that have been created through this instance
++        are not affected.
++      </description>
++    </request>
++  </interface>
++
++  <interface name="zwlr_layer_surface_v1" version="4">
++    <description summary="layer metadata interface">
++      An interface that may be implemented by a wl_surface, for surfaces that
++      are designed to be rendered as a layer of a stacked desktop-like
++      environment.
++
++      Layer surface state (layer, size, anchor, exclusive zone,
++      margin, interactivity) is double-buffered, and will be applied at the
++      time wl_surface.commit of the corresponding wl_surface is called.
++
++      Attaching a null buffer to a layer surface unmaps it.
++
++      Unmapping a layer_surface means that the surface cannot be shown by the
++      compositor until it is explicitly mapped again. The layer_surface
++      returns to the state it had right after layer_shell.get_layer_surface.
++      The client can re-map the surface by performing a commit without any
++      buffer attached, waiting for a configure event and handling it as usual.
++    </description>
++
++    <request name="set_size">
++      <description summary="sets the size of the surface">
++        Sets the size of the surface in surface-local coordinates. The
++        compositor will display the surface centered with respect to its
++        anchors.
++
++        If you pass 0 for either value, the compositor will assign it and
++        inform you of the assignment in the configure event. You must set your
++        anchor to opposite edges in the dimensions you omit; not doing so is a
++        protocol error. Both values are 0 by default.
++
++        Size is double-buffered, see wl_surface.commit.
++      </description>
++      <arg name="width" type="uint"/>
++      <arg name="height" type="uint"/>
++    </request>
++
++    <request name="set_anchor">
++      <description summary="configures the anchor point of the surface">
++        Requests that the compositor anchor the surface to the specified edges
++        and corners. If two orthogonal edges are specified (e.g. 'top' and
++        'left'), then the anchor point will be the intersection of the edges
++        (e.g. the top left corner of the output); otherwise the anchor point
++        will be centered on that edge, or in the center if none is specified.
++
++        Anchor is double-buffered, see wl_surface.commit.
++      </description>
++      <arg name="anchor" type="uint" enum="anchor"/>
++    </request>
++
++    <request name="set_exclusive_zone">
++      <description summary="configures the exclusive geometry of this surface">
++        Requests that the compositor avoids occluding an area with other
++        surfaces. The compositor's use of this information is
++        implementation-dependent - do not assume that this region will not
++        actually be occluded.
++
++        A positive value is only meaningful if the surface is anchored to one
++        edge or an edge and both perpendicular edges. If the surface is not
++        anchored, anchored to only two perpendicular edges (a corner), anchored
++        to only two parallel edges or anchored to all edges, a positive value
++        will be treated the same as zero.
++
++        A positive zone is the distance from the edge in surface-local
++        coordinates to consider exclusive.
++
++        Surfaces that do not wish to have an exclusive zone may instead specify
++        how they should interact with surfaces that do. If set to zero, the
++        surface indicates that it would like to be moved to avoid occluding
++        surfaces with a positive exclusive zone. If set to -1, the surface
++        indicates that it would not like to be moved to accommodate for other
++        surfaces, and the compositor should extend it all the way to the edges
++        it is anchored to.
++
++        For example, a panel might set its exclusive zone to 10, so that
++        maximized shell surfaces are not shown on top of it. A notification
++        might set its exclusive zone to 0, so that it is moved to avoid
++        occluding the panel, but shell surfaces are shown underneath it. A
++        wallpaper or lock screen might set their exclusive zone to -1, so that
++        they stretch below or over the panel.
++
++        The default value is 0.
++
++        Exclusive zone is double-buffered, see wl_surface.commit.
++      </description>
++      <arg name="zone" type="int"/>
++    </request>
++
++    <request name="set_margin">
++      <description summary="sets a margin from the anchor point">
++        Requests that the surface be placed some distance away from the anchor
++        point on the output, in surface-local coordinates. Setting this value
++        for edges you are not anchored to has no effect.
++
++        The exclusive zone includes the margin.
++
++        Margin is double-buffered, see wl_surface.commit.
++      </description>
++      <arg name="top" type="int"/>
++      <arg name="right" type="int"/>
++      <arg name="bottom" type="int"/>
++      <arg name="left" type="int"/>
++    </request>
++
++    <enum name="keyboard_interactivity">
++      <description summary="types of keyboard interaction possible for a layer shell surface">
++        Types of keyboard interaction possible for layer shell surfaces. The
++        rationale for this is twofold: (1) some applications are not interested
++        in keyboard events and not allowing them to be focused can improve the
++        desktop experience; (2) some applications will want to take exclusive
++        keyboard focus.
++      </description>
++
++      <entry name="none" value="0">
++        <description summary="no keyboard focus is possible">
++          This value indicates that this surface is not interested in keyboard
++          events and the compositor should never assign it the keyboard focus.
++
++          This is the default value, set for newly created layer shell surfaces.
++
++          This is useful for e.g. desktop widgets that display information or
++          only have interaction with non-keyboard input devices.
++        </description>
++      </entry>
++      <entry name="exclusive" value="1">
++        <description summary="request exclusive keyboard focus">
++          Request exclusive keyboard focus if this surface is above the shell surface layer.
++
++          For the top and overlay layers, the seat will always give
++          exclusive keyboard focus to the top-most layer which has keyboard
++          interactivity set to exclusive. If this layer contains multiple
++          surfaces with keyboard interactivity set to exclusive, the compositor
++          determines the one receiving keyboard events in an implementation-
++          defined manner. In this case, no guarantee is made when this surface
++          will receive keyboard focus (if ever).
++
++          For the bottom and background layers, the compositor is allowed to use
++          normal focus semantics.
++
++          This setting is mainly intended for applications that need to ensure
++          they receive all keyboard events, such as a lock screen or a password
++          prompt.
++        </description>
++      </entry>
++      <entry name="on_demand" value="2" since="4">
++        <description summary="request regular keyboard focus semantics">
++          This requests the compositor to allow this surface to be focused and
++          unfocused by the user in an implementation-defined manner. The user
++          should be able to unfocus this surface even regardless of the layer
++          it is on.
++
++          Typically, the compositor will want to use its normal mechanism to
++          manage keyboard focus between layer shell surfaces with this setting
++          and regular toplevels on the desktop layer (e.g. click to focus).
++          Nevertheless, it is possible for a compositor to require a special
++          interaction to focus or unfocus layer shell surfaces (e.g. requiring
++          a click even if focus follows the mouse normally, or providing a
++          keybinding to switch focus between layers).
++
++          This setting is mainly intended for desktop shell components (e.g.
++          panels) that allow keyboard interaction. Using this option can allow
++          implementing a desktop shell that can be fully usable without the
++          mouse.
++        </description>
++      </entry>
++    </enum>
++
++    <request name="set_keyboard_interactivity">
++      <description summary="requests keyboard events">
++        Set how keyboard events are delivered to this surface. By default,
++        layer shell surfaces do not receive keyboard events; this request can
++        be used to change this.
++
++        This setting is inherited by child surfaces set by the get_popup
++        request.
++
++        Layer surfaces receive pointer, touch, and tablet events normally. If
++        you do not want to receive them, set the input region on your surface
++        to an empty region.
++
++        Keyboard interactivity is double-buffered, see wl_surface.commit.
++      </description>
++      <arg name="keyboard_interactivity" type="uint" enum="keyboard_interactivity"/>
++    </request>
++
++    <request name="get_popup">
++      <description summary="assign this layer_surface as an xdg_popup parent">
++        This assigns an xdg_popup's parent to this layer_surface.  This popup
++        should have been created via xdg_surface::get_popup with the parent set
++        to NULL, and this request must be invoked before committing the popup's
++        initial state.
++
++        See the documentation of xdg_popup for more details about what an
++        xdg_popup is and how it is used.
++      </description>
++      <arg name="popup" type="object" interface="xdg_popup"/>
++    </request>
++
++    <request name="ack_configure">
++      <description summary="ack a configure event">
++        When a configure event is received, if a client commits the
++        surface in response to the configure event, then the client
++        must make an ack_configure request sometime before the commit
++        request, passing along the serial of the configure event.
++
++        If the client receives multiple configure events before it
++        can respond to one, it only has to ack the last configure event.
++
++        A client is not required to commit immediately after sending
++        an ack_configure request - it may even ack_configure several times
++        before its next surface commit.
++
++        A client may send multiple ack_configure requests before committing, but
++        only the last request sent before a commit indicates which configure
++        event the client really is responding to.
++      </description>
++      <arg name="serial" type="uint" summary="the serial from the configure event"/>
++    </request>
++
++    <request name="destroy" type="destructor">
++      <description summary="destroy the layer_surface">
++        This request destroys the layer surface.
++      </description>
++    </request>
++
++    <event name="configure">
++      <description summary="suggest a surface change">
++        The configure event asks the client to resize its surface.
++
++        Clients should arrange their surface for the new states, and then send
++        an ack_configure request with the serial sent in this configure event at
++        some point before committing the new surface.
++
++        The client is free to dismiss all but the last configure event it
++        received.
++
++        The width and height arguments specify the size of the window in
++        surface-local coordinates.
++
++        The size is a hint, in the sense that the client is free to ignore it if
++        it doesn't resize, pick a smaller size (to satisfy aspect ratio or
++        resize in steps of NxM pixels). If the client picks a smaller size and
++        is anchored to two opposite anchors (e.g. 'top' and 'bottom'), the
++        surface will be centered on this axis.
++
++        If the width or height arguments are zero, it means the client should
++        decide its own window dimension.
++      </description>
++      <arg name="serial" type="uint"/>
++      <arg name="width" type="uint"/>
++      <arg name="height" type="uint"/>
++    </event>
++
++    <event name="closed">
++      <description summary="surface should be closed">
++        The closed event is sent by the compositor when the surface will no
++        longer be shown. The output may have been destroyed or the user may
++        have asked for it to be removed. Further changes to the surface will be
++        ignored. The client should destroy the resource after receiving this
++        event, and create a new surface if they so choose.
++      </description>
++    </event>
++
++    <enum name="error">
++      <entry name="invalid_surface_state" value="0" summary="provided surface state is invalid"/>
++      <entry name="invalid_size" value="1" summary="size is invalid"/>
++      <entry name="invalid_anchor" value="2" summary="anchor bitfield is invalid"/>
++      <entry name="invalid_keyboard_interactivity" value="3" summary="keyboard interactivity is invalid"/>
++    </enum>
++
++    <enum name="anchor" bitfield="true">
++      <entry name="top" value="1" summary="the top edge of the anchor rectangle"/>
++      <entry name="bottom" value="2" summary="the bottom edge of the anchor rectangle"/>
++      <entry name="left" value="4" summary="the left edge of the anchor rectangle"/>
++      <entry name="right" value="8" summary="the right edge of the anchor rectangle"/>
++    </enum>
++
++    <!-- Version 2 additions -->
++
++    <request name="set_layer" since="2">
++      <description summary="change the layer of the surface">
++        Change the layer that the surface is rendered on.
++
++        Layer is double-buffered, see wl_surface.commit.
++      </description>
++      <arg name="layer" type="uint" enum="zwlr_layer_shell_v1.layer" summary="layer to move this surface to"/>
++    </request>
++  </interface>
++</protocol>

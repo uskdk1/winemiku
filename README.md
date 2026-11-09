@@ -12,7 +12,7 @@ nix profile install github:uskdk1/winemiku               # 설치하면 winemiku
 ```
 
 - prefix: `~/.local/share/winemiku/prefix` (`WINEPREFIX`로 바꿀 수 있음), 템플릿: `~/.cache/winemiku/prefix-template`
-- Wayland 전용, 한국어 로캘·폰트, DXVK, 트레이 창 끔 (아래 "실행 환경" 참고)
+- Wayland 전용, 한국어 로캘·폰트, DXVK, 트레이 아이콘은 바(waybar 등)에 표시 (아래 "실행 환경" 참고)
 - `.#winemiku`(기본)는 nixpkgs 캐시의 Wine 위에 패치된 모듈만 덮어쓰고, 패치된 DXVK를 쓴다.
   `.#winemiku-unpatched`는 nixpkgs 캐시의 Wine을 그대로 써서 바로 받지만 `patches/*.patch`(Wine 패치)가 빠진다.
 
@@ -105,8 +105,16 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
     끄기: `DXVK_CONFIG="d3d11.autoGenerateMips = False" bin/winemiku ...` (다른 앱에서 켜려면 `= True`)
   - DXVK 소스 수정: `src/dxvk-<버전>/`에 소스를 풀고 git 기준점을 만든 뒤 고치고, `git diff > patches/dxvk/NNNN-<이름>.patch`.
     nixpkgs의 DXVK 버전이 바뀌면 패치를 새 버전에 맞춰 다시 만들어야 할 수 있다.
-- **트레이 창 끔**(`HKCU\Software\Wine\Explorer\ShowSystray=0`): Wayland엔 트레이가 없어 explorer가 띄우는 대체 창이 포커스를 뺏는다.
-  트레이로 숨은 앱(카카오톡 등)은 다시 실행하면 창이 뜬다. 완전히 끄려면 `bin/winemiku --kill`.
+- **트레이 아이콘**(`patches/0004`): 앱의 트레이 아이콘(`Shell_NotifyIcon`)을 StatusNotifierItem(D-Bus)으로 내보내
+  waybar·KDE 등 바의 트레이에 띄운다 (winewayland `wayland_systray.c`, explorer 프로세스에서 동작).
+  - 클릭은 Windows 트레이처럼 전달한다: 한 번 = 클릭, 더블클릭 시간 안에 두 번 = 더블클릭(카카오톡은 이때 창이 뜬다),
+    우클릭 = 메뉴, 가운데 = 가운데 버튼. waybar는 두 번째 누름에 Activate를 두 번 보내서 50ms 안의 중복은 버린다.
+  - 트레이 메뉴: 클릭 직후(2초 안) 그 앱이 띄우는 첫 팝업을 layer-shell(overlay) 표면으로 만들어 클릭한 곳, 바 바로 아래에 띄운다.
+    메뉴 아래에 투명한 막(top 레이어, 바는 안 덮음)을 깔아서, 바깥을 클릭하면 메뉴 밖 좌표의 클릭으로 앱에 보내 메뉴가 닫히게 한다.
+    클릭 위치는 explorer가 데스크톱 창 속성(`__wine_tray_*`)에 적어 앱 프로세스에 넘긴다.
+  - 바(StatusNotifierWatcher)가 나중에 켜져도 다시 등록된다. 세션 버스가 없으면 explorer의 기본 트레이로 돌아간다.
+    끄기: `WINE_WAYLAND_SNI=0`. 로그: `WINEDEBUG=+systray`.
+  - explorer의 대체 트레이 창은 계속 끈다(`HKCU\Software\Wine\Explorer\ShowSystray=0`): Wayland에서 진짜 창이 되어 포커스를 뺏는다.
 - **팝업 메뉴**(`patches/0003`): 활성화되지 않는 팝업(`WS_EX_NOACTIVATE`, 메뉴·툴팁)은 따로 된 Wayland 창이 아니라
   메인 창의 subsurface로 띄운다. Qt 메뉴는 테두리가 없어도 `WS_CAPTION`을 달고 있어 일반 창(xdg_toplevel)으로 판정되는데,
   Wayland에서는 새 창이 무조건 포커스를 가져가서 메뉴가 활성 창이 되고 Qt가 바로 닫았다 (카카오톡: 우클릭 메뉴가 뜨자마자 사라짐).
