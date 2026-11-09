@@ -149,7 +149,7 @@ wm-patch() {
     if git -C "$tree" diff --cached --quiet; then
         echo "변경사항 없음" >&2; return 1
     fi
-    local n; n=$(find "$WM_ROOT/patches" -name '*.patch' | wc -l)
+    local n; n=$(find "$WM_ROOT/patches" -maxdepth 1 -name '*.patch' | wc -l)
     local out; out=$(printf '%s/patches/%04d-%s.patch' "$WM_ROOT" $((n + 1)) "$1")
     git -C "$tree" diff --cached > "$out"
     git -C "$tree" -c user.name=wm -c user.email=wm@local commit -qm "$1"

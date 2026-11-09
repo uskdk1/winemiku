@@ -33,7 +33,20 @@
       # 한글 폰트 (static 버전: Wine 은 가변 폰트 처리가 불완전)
       cjkFonts = "${pkgs.noto-fonts-cjk-sans-static}/share/fonts/opentype/noto-cjk";
       # D3D8/9/10/11 -> Vulkan. Wayland 에서 wined3d(D3D->OpenGL)는 화면 갱신이 안 되는 앱이 있음 (카카오톡)
-      dxvk = "${pkgs.dxvk.bin}"; # x64/ x32/ 에 DLL
+      # patches/dxvk/*.patch 를 이름순으로 적용 (예: 카카오톡 큰 이미지 축소 시 자동 mipmap)
+      dxvkPatches =
+        let files = builtins.attrNames (builtins.readDir ./patches/dxvk);
+        in map (f: ./patches/dxvk + "/${f}")
+          (lib.sort lib.lessThan (lib.filter (lib.hasSuffix ".patch") files));
+      patchDxvk = d: d.overrideAttrs (o: {
+        pname = "dxvk-miku";
+        patches = (o.patches or [ ]) ++ dxvkPatches;
+      });
+      dxvk = pkgs.runCommand "dxvk-miku-${pkgs.dxvk.version}-bin" { } ''
+        mkdir -p $out
+        ln -s ${patchDxvk pkgs.dxvk.dxvk64}/bin $out/x64
+        ln -s ${patchDxvk pkgs.dxvk.dxvk32}/bin $out/x32
+      ''; # x64/ x32/ 에 DLL
 
       # bin/winemiku 가 prefix 에 적용하는 데이터: 레지스트리 설정, 폰트, DXVK
       winemiku-share = pkgs.runCommand "winemiku-share" { nativeBuildInputs = [ pkgs.python3 ]; } ''

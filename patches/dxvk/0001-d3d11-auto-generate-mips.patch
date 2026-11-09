@@ -1,0 +1,311 @@
+diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
+index 487bcf5..24157a9 100644
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -4230,6 +4230,20 @@ namespace dxvk {
+   }
+ 
+ 
++  template<typename ContextType>
++  void D3D11CommonContext<ContextType>::AutoGenerateMips(
++          D3D11CommonTexture*               pTexture) {
++    if (!pTexture->HasAutoMips())
++      return;
++
++    EmitCs([
++      cImageView = pTexture->GetAutoMipView()
++    ] (DxvkContext* ctx) {
++      ctx->generateMipmaps(cImageView, VK_FILTER_LINEAR);
++    });
++  }
++
++
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::CopyImage(
+           D3D11CommonTexture*               pDstTexture,
+@@ -4440,6 +4454,8 @@ namespace dxvk {
+       }
+     }
+ 
++    AutoGenerateMips(pDstTexture);
++
+     if (pDstTexture->HasSequenceNumber()) {
+       for (uint32_t i = 0; i < pDstLayers->layerCount; i++) {
+         GetTypedContext()->TrackTextureSequenceNumber(pDstTexture, D3D11CalcSubresource(
+@@ -5759,6 +5775,8 @@ namespace dxvk {
+       }
+     }
+ 
++    AutoGenerateMips(pDstTexture);
++
+     if (pDstTexture->HasSequenceNumber())
+       GetTypedContext()->TrackTextureSequenceNumber(pDstTexture, dstSubresource);
+   }
+diff --git a/src/d3d11/d3d11_context.h b/src/d3d11/d3d11_context.h
+index 666ae13..c6e26ee 100644
+--- a/src/d3d11/d3d11_context.h
++++ b/src/d3d11/d3d11_context.h
+@@ -949,6 +949,9 @@ namespace dxvk {
+             VkDeviceSize                      SrcOffset,
+             VkDeviceSize                      ByteCount);
+ 
++    void AutoGenerateMips(
++            D3D11CommonTexture*               pTexture);
++
+     void CopyImage(
+             D3D11CommonTexture*               pDstTexture,
+       const VkImageSubresourceLayers*         pDstLayers,
+diff --git a/src/d3d11/d3d11_initializer.cpp b/src/d3d11/d3d11_initializer.cpp
+index 0602cbb..9313f22 100644
+--- a/src/d3d11/d3d11_initializer.cpp
++++ b/src/d3d11/d3d11_initializer.cpp
+@@ -240,6 +240,15 @@ namespace dxvk {
+             cStagingSlice.offset(),
+             CACHE_LINE_SIZE, cFormat);
+         });
++
++        // Hidden mips were uploaded from unwritten staging memory
++        if (pTexture->HasAutoMips()) {
++          EmitCs([
++            cImageView = pTexture->GetAutoMipView()
++          ] (DxvkContext* ctx) {
++            ctx->generateMipmaps(cImageView, VK_FILTER_LINEAR);
++          });
++        }
+       }
+     } else {
+       if (pTexture->HasImage()) {
+diff --git a/src/d3d11/d3d11_options.cpp b/src/d3d11/d3d11_options.cpp
+index adf426d..b3b110a 100644
+--- a/src/d3d11/d3d11_options.cpp
++++ b/src/d3d11/d3d11_options.cpp
+@@ -21,6 +21,7 @@ namespace dxvk {
+     this->samplerAnisotropy     = config.getOption<int32_t>("d3d11.samplerAnisotropy", -1);
+     this->samplerLodBias        = config.getOption<float>("d3d11.samplerLodBias", 0.0f);
+     this->clampNegativeLodBias  = config.getOption<bool>("d3d11.clampNegativeLodBias", false);
++    this->autoGenerateMips      = config.getOption<bool>("d3d11.autoGenerateMips", false);
+     this->forceSampleRateShading = config.getOption<bool>("d3d11.forceSampleRateShading", false);
+     this->disableMsaa           = config.getOption<bool>("d3d11.disableMsaa", false);
+     this->enableContextLock     = config.getOption<bool>("d3d11.enableContextLock", false);
+diff --git a/src/d3d11/d3d11_options.h b/src/d3d11/d3d11_options.h
+index 3bf1e5e..28b15db 100644
+--- a/src/d3d11/d3d11_options.h
++++ b/src/d3d11/d3d11_options.h
+@@ -60,6 +60,12 @@ namespace dxvk {
+     /// Clamps negative LOD bias
+     bool clampNegativeLodBias = false;
+ 
++    /// Gives large, single-level, shader-resource-only RGBA8 textures a
++    /// hidden mip chain that is regenerated whenever the texture is written,
++    /// and lets samplers without a mip range (MinLOD = MaxLOD = 0) use it.
++    /// Fixes aliasing in apps that downscale big images without mipmaps.
++    bool autoGenerateMips = false;
++
+     /// Override maximum frame latency if the app specifies
+     /// a higher value. May help with frame timing issues.
+     int32_t maxFrameLatency = 0;
+diff --git a/src/d3d11/d3d11_sampler.cpp b/src/d3d11/d3d11_sampler.cpp
+index fbe38f4..51ee131 100644
+--- a/src/d3d11/d3d11_sampler.cpp
++++ b/src/d3d11/d3d11_sampler.cpp
+@@ -19,8 +19,25 @@ namespace dxvk {
+     VkFilter minFilter = (filterBits & 0x10) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+     VkFilter magFilter = (filterBits & 0x04) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+ 
+-    info.setFilter(minFilter, magFilter,
+-      (filterBits & 0x01) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
++    VkSamplerMipmapMode mipMode = (filterBits & 0x01)
++      ? VK_SAMPLER_MIPMAP_MODE_LINEAR
++      : VK_SAMPLER_MIPMAP_MODE_NEAREST;
++
++    float minLod = desc.MinLOD;
++    float maxLod = desc.MaxLOD;
++
++    // Samplers that pin the LOD to 0 are how apps say "no mipmaps"
++    // (e.g. Qt RHI). Let them use hidden mip chains instead, which
++    // only exist on textures created with autoGenerateMips. Textures
++    // with a single mip level are unaffected.
++    if (device->GetOptions()->autoGenerateMips
++     && minFilter == VK_FILTER_LINEAR
++     && minLod == 0.0f && maxLod == 0.0f) {
++      mipMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
++      maxLod = D3D11_FLOAT32_MAX;
++    }
++
++    info.setFilter(minFilter, magFilter, mipMode);
+ 
+     // Enforce LOD bias specified in the device options
+     float lodBias = desc.MipLODBias;
+@@ -32,7 +49,7 @@ namespace dxvk {
+         lodBias = std::max(lodBias, 0.0f);
+     }
+ 
+-    info.setLodRange(desc.MinLOD, desc.MaxLOD, lodBias);
++    info.setLodRange(minLod, maxLod, lodBias);
+ 
+     // Enforce anisotropy specified in the device options
+     uint32_t anisotropy = (filterBits & 0x40) ? desc.MaxAnisotropy : 0u;
+diff --git a/src/d3d11/d3d11_texture.cpp b/src/d3d11/d3d11_texture.cpp
+index 2da6f5c..2a89c37 100644
+--- a/src/d3d11/d3d11_texture.cpp
++++ b/src/d3d11/d3d11_texture.cpp
+@@ -163,6 +163,34 @@ namespace dxvk {
+       imageInfo.shared = VK_TRUE;
+     }
+ 
++    // Hidden mip chain for large sampled-only images, see
++    // D3D11Options::autoGenerateMips. The D3D11 description
++    // and thus all subresource indexing still use one level.
++    const uint32_t maxExtent = std::max(m_desc.Width, m_desc.Height);
++
++    bool autoMips = pDevice->GetOptions()->autoGenerateMips
++      && Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D
++      && m_desc.MipLevels == 1u
++      && m_desc.ArraySize == 1u
++      && m_desc.SampleDesc.Count == 1u
++      && m_desc.BindFlags == D3D11_BIND_SHADER_RESOURCE
++      && (m_desc.Usage == D3D11_USAGE_DEFAULT || m_desc.Usage == D3D11_USAGE_IMMUTABLE)
++      && !m_desc.CPUAccessFlags
++      && !m_desc.MiscFlags
++      && !(DxgiUsage & DXGI_USAGE_BACK_BUFFER)
++      && !vkImage && !p11on12Info
++      && maxExtent >= 256u
++      && IsAutoMipFormat(m_desc.Format);
++
++    if (autoMips) {
++      uint32_t levels = 1u;
++
++      while (maxExtent >> levels)
++        levels += 1u;
++
++      imageInfo.mipLevels = levels;
++    }
++
+     // Some image formats (i.e. the R32G32B32 ones) are
+     // only supported with linear tiling on most GPUs
+     if (!CheckImageSupport(&imageInfo, VK_IMAGE_TILING_OPTIMAL))
+@@ -247,6 +275,20 @@ namespace dxvk {
+     if (m_mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_DIRECT)
+       m_mapPtr = m_image->mapPtr(0);
+ 
++    if (autoMips && m_mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
++      DxvkImageViewKey viewKey;
++      viewKey.viewType   = VK_IMAGE_VIEW_TYPE_2D;
++      viewKey.format     = imageInfo.format;
++      viewKey.aspects    = VK_IMAGE_ASPECT_COLOR_BIT;
++      viewKey.usage      = VK_IMAGE_USAGE_SAMPLED_BIT;
++      viewKey.mipIndex   = 0u;
++      viewKey.mipCount   = imageInfo.mipLevels;
++      viewKey.layerIndex = 0u;
++      viewKey.layerCount = 1u;
++
++      m_autoMipView = m_image->createView(viewKey);
++    }
++
+     if (imageInfo.sharing.mode == DxvkSharedHandleMode::Export) {
+       if (m_desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) {
+         try {
+@@ -839,6 +881,17 @@ namespace dxvk {
+   }
+ 
+ 
++  BOOL D3D11CommonTexture::IsAutoMipFormat(
++          DXGI_FORMAT           Format) {
++    return Format == DXGI_FORMAT_R8G8B8A8_UNORM
++        || Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
++        || Format == DXGI_FORMAT_B8G8R8A8_UNORM
++        || Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
++        || Format == DXGI_FORMAT_B8G8R8X8_UNORM
++        || Format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
++  }
++
++
+   void D3D11CommonTexture::CreateMappedBuffer(UINT Subresource) {
+     const DxvkFormatInfo* formatInfo = lookupFormatInfo(
+       m_device->LookupPackedFormat(m_desc.Format, GetFormatMode()).Format);
+diff --git a/src/d3d11/d3d11_texture.h b/src/d3d11/d3d11_texture.h
+index 589603c..ade9387 100644
+--- a/src/d3d11/d3d11_texture.h
++++ b/src/d3d11/d3d11_texture.h
+@@ -249,7 +249,25 @@ namespace dxvk {
+     Rc<DxvkImage> GetImage() const {
+       return m_image;
+     }
+-    
++
++    /**
++     * \brief Checks whether the image has a hidden mip chain
++     *
++     * See \c D3D11Options::autoGenerateMips. The D3D11 description
++     * still reports a single mip level for such textures.
++     */
++    bool HasAutoMips() const {
++      return m_autoMipView != nullptr;
++    }
++
++    /**
++     * \brief View covering the full hidden mip chain
++     * \returns Image view, or \c nullptr if there is none
++     */
++    Rc<DxvkImageView> GetAutoMipView() const {
++      return m_autoMipView;
++    }
++
+     /**
+      * \brief Mapped subresource buffer
+      * 
+@@ -583,6 +601,7 @@ namespace dxvk {
+     VkFormat                      m_packedFormat;
+     
+     Rc<DxvkImage>                 m_image;
++    Rc<DxvkImageView>             m_autoMipView;
+     small_vector<MappedBuffer, 6> m_buffers;
+     small_vector<MappedInfo, 6>   m_mapInfo;
+ 
+@@ -615,6 +634,9 @@ namespace dxvk {
+     static BOOL IsR32UavCompatibleFormat(
+             DXGI_FORMAT           Format);
+ 
++    static BOOL IsAutoMipFormat(
++            DXGI_FORMAT           Format);
++
+     static VkImageType GetImageTypeFromResourceDim(
+             D3D11_RESOURCE_DIMENSION  Dimension);
+     
+diff --git a/src/d3d11/d3d11_view_srv.cpp b/src/d3d11/d3d11_view_srv.cpp
+index 78f4830..f7ebbce 100644
+--- a/src/d3d11/d3d11_view_srv.cpp
++++ b/src/d3d11/d3d11_view_srv.cpp
+@@ -176,6 +176,13 @@ namespace dxvk {
+       m_info.Image.NumLevels = viewInfo.mipCount;
+       m_info.Image.NumLayers = viewInfo.layerCount;
+ 
++      // Expose the hidden mip chain to shaders. m_info keeps the
++      // app-visible range since it is used for hazard tracking.
++      if (texture->HasAutoMips()
++       && pDesc->ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D
++       && viewInfo.mipIndex == 0u)
++        viewInfo.mipCount = texture->GetImage()->info().mipLevels;
++
+       // Create the underlying image view object
+       m_imageView = texture->GetImage()->createView(viewInfo);
+     }
+diff --git a/src/util/config/config.cpp b/src/util/config/config.cpp
+index 2b7ced4..5604624 100644
+--- a/src/util/config/config.cpp
++++ b/src/util/config/config.cpp
+@@ -20,6 +20,14 @@ namespace dxvk {
+ 
+ 
+   const static ProfileList g_profiles = {
++    /* KakaoTalk (Qt Quick) - draws large images  *
++     * (e.g. 1200x600 ads) into small slots with  *
++     * a non-mipmapped bilinear sampler, which    *
++     * aliases badly. Windows renders these ads   *
++     * through WebView2 instead.                  */
++    { R"(\\KakaoTalkUI\.exe$)", {{
++      { "d3d11.autoGenerateMips",           "True" },
++    }} },
+     /**********************************************/
+     /* D3D12 GAMES (vkd3d-proton with dxvk dxgi)  */
+     /**********************************************/
