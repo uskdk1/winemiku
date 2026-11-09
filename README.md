@@ -106,6 +106,9 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
     nixpkgs의 DXVK 버전이 바뀌면 패치를 새 버전에 맞춰 다시 만들어야 할 수 있다.
 - **트레이 창 끔**(`HKCU\Software\Wine\Explorer\ShowSystray=0`): Wayland엔 트레이가 없어 explorer가 띄우는 대체 창이 포커스를 뺏는다.
   트레이로 숨은 앱(카카오톡 등)은 다시 실행하면 창이 뜬다. 완전히 끄려면 `bin/winemiku --kill`.
+- **팝업 메뉴**(`patches/0003`): 활성화되지 않는 팝업(`WS_EX_NOACTIVATE`, 메뉴·툴팁)은 따로 된 Wayland 창이 아니라
+  메인 창의 subsurface로 띄운다. Qt 메뉴는 테두리가 없어도 `WS_CAPTION`을 달고 있어 일반 창(xdg_toplevel)으로 판정되는데,
+  Wayland에서는 새 창이 무조건 포커스를 가져가서 메뉴가 활성 창이 되고 Qt가 바로 닫았다 (카카오톡: 우클릭 메뉴가 뜨자마자 사라짐).
 - **Wayland 전용**: `DISPLAY`를 지우고 레지스트리 `HKCU\Software\Wine\Drivers\Graphics=wayland`로 고정. XWayland로 빠지지 않음.
 - **한국어**: `LANG/LC_ALL=ko_KR.UTF-8` (코드페이지 949, 비유니코드 앱 대응). 바꾸려면 `WM_LANG=ja_JP.UTF-8 wm-run ...`
 - **폰트**: 앱은 폰트를 이름으로 찾는다. Windows 기본 UI 폰트 이름으로 고정 굵기 Noto를 등록한다

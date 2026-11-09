@@ -1,0 +1,16 @@
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 270fdfb..7a24275 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -378,6 +378,11 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
+     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
+     /* activated windows are managed */
+     if (!(swp_flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW))) return TRUE;
++    /* non-activatable popups (menus, tooltips) are not managed: an xdg_toplevel
++     * always takes keyboard focus on Wayland, which activates the popup and makes
++     * apps close it immediately (e.g. Qt frameless menus keep WS_CAPTION) */
++    ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
++    if ((style & WS_POPUP) && (ex_style & WS_EX_NOACTIVATE)) return FALSE;
+     if (hwnd == get_active_window()) return TRUE;
+     /* windows with caption are managed */
+     if ((style & WS_CAPTION) == WS_CAPTION) return TRUE;
