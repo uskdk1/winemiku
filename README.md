@@ -13,13 +13,13 @@ nix profile install github:uskdk1/winemiku               # 설치하면 winemiku
 
 - prefix: `~/.local/share/winemiku/prefix` (`WINEPREFIX`로 바꿀 수 있음), 템플릿: `~/.cache/winemiku/prefix-template`
 - Wayland 전용, 한국어 로캘·폰트, DXVK, 트레이 창 끔 (아래 "실행 환경" 참고)
-- `.#winemiku`(기본)는 패치된 Wine과 패치된 DXVK를 쓴다.
+- `.#winemiku`(기본)는 nixpkgs 캐시의 Wine 위에 패치된 모듈만 덮어쓰고, 패치된 DXVK를 쓴다.
   `.#winemiku-unpatched`는 nixpkgs 캐시의 Wine을 그대로 써서 바로 받지만 `patches/*.patch`(Wine 패치)가 빠진다.
 
 ### 바이너리 캐시 (Cachix)
 
 패치된 Wine·DXVK는 `https://winemiku.cachix.org`에 올라가 있다. 캐시를 쓰지 못하면 직접 빌드한다
-(Wine 약 1시간 + DXVK 약 10분).
+(패치된 Wine 모듈 약 4분 + DXVK 약 10분). Wine 본체는 cache.nixos.org에서 받는다.
 
 flake의 `nixConfig`에 캐시가 적혀 있어서 처음 `nix run` 할 때 쓸지 물어보지만,
 **Nix의 신뢰된 사용자(`trusted-users`)일 때만 적용된다.** NixOS 기본값(`trusted-users = root`)이면
@@ -46,9 +46,10 @@ NixOS가 아니면 `/etc/nix/nix.conf`에 같은 내용을 넣거나(`extra-subs
 
 | 패키지 | 내용 |
 |---|---|
-| `winemiku` (기본) | 실행기 + 패치된 Wine + 데이터 |
+| `winemiku` (기본) | 실행기 + 캐시의 Wine + 패치된 모듈 + 데이터 |
 | `winemiku-unpatched` | 실행기 + 캐시의 Wine(패치 없음) + 데이터 |
-| `wine-miku` | 패치된 Wine만 |
+| `wine-miku-modules` | 패치가 건드리는 모듈만 빌드한 결과 (dll·so·wineserver) |
+| `wine-miku` | 패치된 Wine 전체 (약 1시간, 확인용. 배포에는 안 씀) |
 | `winemiku-share` | prefix 데이터 (레지스트리 설정, 폰트, 패치된 DXVK 링크) |
 | `winemiku-fonts` | prefix용 고정 굵기 폰트 (Segoe UI·Malgun Gothic 이름의 Noto, DejaVu Sans, Arimo) |
 
@@ -126,11 +127,14 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
 - 터미널로 파이프한 출력(`wm-run reg query ... | less` 등)은 CP949라 깨져 보인다. `| iconv -f CP949`를 붙일 것.
 
 `wm-run`은 `runtime/`(vanilla wine의 심볼릭 링크 복제본, 내장 Tahoma·Arial 제외)에 `override/`의 DLL을 끼워 넣어 실행합니다.
-배포판(`nix run`)도 같은 방식의 복제본(`flake.nix`의 `wineRuntime`)을 써서 Wine을 다시 컴파일하지 않습니다.
+배포판(`nix run`)도 같은 방식이다. `flake.nix`의 `wineRuntime`이 vanilla wine 복제본에 `wine-miku-modules`를 덮어쓴다.
+`wine-miku-modules`는 같은 소스에 패치를 적용하고 configure한 뒤, 패치 파일의 `diff --git a/` 경로에서 뽑은 모듈
+(`dlls/<이름>`, `programs/<이름>`, `server`)만 `make`한다. 그래서 패치를 바꿔도 Wine 전체를 다시 컴파일하지 않는다.
 Wine은 설치 디렉터리를 `WINEDLLPATH`보다 먼저 찾기 때문에 `WINEDLLPATH`로는 빌트인 DLL을 덮어쓸 수 없습니다.
 
 - 새로 추가한 소스 파일은 `wm-patch` 전에 `git -C src/wine-* add <파일>` 필요.
-- 패치를 추가/변경한 뒤 `nix build`로 전체 빌드를 확인. `./result/bin/wine`
+- 패치를 추가/변경한 뒤 `nix build`로 확인(약 4분). 모듈 목록 확인: `nix eval .#wine-miku-modules.buildPhase`
+- 헤더(`include/`)나 여러 모듈이 같이 쓰는 코드를 고치는 패치는 모듈만 덮어쓰면 안 맞을 수 있다. 그때는 `nix build .#wine-miku`(전체)로 확인할 것.
 - 소스를 처음부터 다시: `rm -rf src && wm-prepare`
 - 로딩 확인: `WINEDEBUG=+loaddll wm-run app.exe`
 

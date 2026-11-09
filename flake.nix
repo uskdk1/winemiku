@@ -24,10 +24,58 @@
         in map (f: ./patches + "/${f}")
           (lib.sort lib.lessThan (lib.filter (lib.hasSuffix ".patch") files));
 
-      # 패치 적용된 전체 wine
+      # 패치 적용된 전체 wine (전체 빌드 약 1시간. 배포용은 아래 wine-miku-modules 를 쓴다)
       wine-miku = wine-vanilla.overrideAttrs (o: {
         pname = "wine-miku";
         patches = (o.patches or [ ]) ++ myPatches;
+      });
+
+      # 패치가 건드리는 모듈: patches/*.patch 의 "diff --git a/<경로>" 에서
+      # dlls/<이름>, programs/<이름>, server 를 뽑는다
+      patchedModules = lib.unique (lib.concatMap
+        (p: lib.concatMap
+          (l:
+            let m = builtins.match "diff --git a/((dlls|programs)/[^/]+|server)/.*" l;
+            in lib.optional (m != null) (builtins.head m))
+          (lib.splitString "\n" (builtins.readFile p)))
+        myPatches);
+
+      # 패치된 모듈만 빌드 (같은 소스·패치·configure 에서 make <모듈>/all 만. 몇 분)
+      # 결과: lib/wine/{x86_64,i386}-windows/*.dll|exe|drv, lib/wine/x86_64-unix/*.so, bin/wineserver
+      wine-miku-modules = wine-miku.overrideAttrs (o: {
+        pname = "wine-miku-modules";
+        buildPhase = ''
+          runHook preBuild
+          make -j$NIX_BUILD_CORES ${lib.concatMapStringsSep " " (m: "${m}/all") patchedModules}
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          for d in ${toString patchedModules}; do
+            if [ "$d" = server ]; then
+              install -Dm755 server/wineserver $out/bin/wineserver; continue
+            fi
+            top=''${d%%/*} name=''${d#*/}
+            case "$name" in
+              *.*) mod=$name ;;
+              *) if [ "$top" = programs ]; then mod=$name.exe; else mod=$name.dll; fi ;;
+            esac
+            so=''${mod%.*}.so n=0
+            for arch in x86_64-windows i386-windows; do
+              if [ -f "$d/$arch/$mod" ]; then
+                install -Dm644 "$d/$arch/$mod" "$out/lib/wine/$arch/$mod"; n=$((n + 1))
+              fi
+            done
+            if [ -f "$d/$so" ]; then
+              install -Dm755 "$d/$so" "$out/lib/wine/x86_64-unix/$so"; n=$((n + 1))
+            fi
+            [ $n -gt 0 ] || { echo "$d: 빌드 결과물이 없음" >&2; exit 1; }
+          done
+          runHook postInstall
+        '';
+        postInstall = "";
+        doCheck = false;
+        doInstallCheck = false;
       });
 
       # 한글 폰트 (static 버전: Wine 은 가변 폰트 처리가 불완전)
@@ -80,7 +128,9 @@
       # 연결하는데, 같은 이름의 폰트가 있으면 Wine 이 Replacements 를 무시한다.
       # Wine 은 ntdll.so 의 실제 위치 기준으로 share/wine 을 찾으므로 실행파일과 ntdll.so 는 복사
       # (개발 모드 runtime/ 과 같은 방식, scripts/dev.sh _wm_runtime).
-      wineRuntime = wine: pkgs.runCommand "${wine.name}-runtime"
+      # modules(wine-miku-modules 등)가 있으면 그 파일들을 덮어쓴다 (개발 모드의 override/ 와 같은 방식).
+      # .vanilla 에 modules 도 적어서 모듈이 바뀌면 bin/winemiku 가 prefix 를 갱신한다.
+      wineRuntime = wine: modules: pkgs.runCommand "${wine.name}-runtime"
         { nativeBuildInputs = [ pkgs.python3 ]; passthru = { inherit (wine) version; }; } ''
         cp -rs ${wine}/. $out && chmod -R u+w $out
         for f in bin/wine bin/.wine lib/wine/x86_64-unix/{wine,wine-preloader,ntdll.so}; do
@@ -89,35 +139,41 @@
         done
         python3 -I ${./scripts/rewrap.py} ${wine} $out
         rm -f $out/share/wine/fonts/{tahoma,tahomabd,arial}.ttf
-        echo ${wine} > $out/.vanilla
+        ${lib.optionalString (modules != null) ''
+          (cd ${modules} && find . -type f) | while read -r f; do
+            rm -f $out/$f; install -Dm755 ${modules}/$f $out/$f
+          done
+        ''}
+        echo ${wine}${lib.optionalString (modules != null) " ${modules}"} > $out/.vanilla
       '';
 
       # 배포용: 실행기 + 패치된 wine + 데이터. nix run 으로 바로 쓴다.
       # prefix 는 ~/.local/share/winemiku/prefix, 템플릿은 ~/.cache/winemiku/prefix-template
-      mkWinemiku = wine: pkgs.runCommand "winemiku-${wine.version}"
+      mkWinemiku = wine: modules: pkgs.runCommand "winemiku-${wine.version}"
         {
           nativeBuildInputs = [ pkgs.makeWrapper ];
           meta.mainProgram = "winemiku";
-          passthru = { inherit wine; share = winemiku-share; };
+          passthru = { inherit wine modules; share = winemiku-share; };
         } ''
         install -Dm755 ${./bin/winemiku} $out/libexec/winemiku
         patchShebangs $out/libexec/winemiku
         makeWrapper $out/libexec/winemiku $out/bin/winemiku \
           --prefix PATH : ${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused procps diffutils ])} \
-          --set WINEMIKU_WINE ${wineRuntime wine} \
+          --set WINEMIKU_WINE ${wineRuntime wine modules} \
           --set WINEMIKU_SHARE ${winemiku-share} \
           --set WINEMIKU_OVERRIDE "" \
           --set WINEMIKU_SELF $out/bin/winemiku \
           --run 'export WINEMIKU_PREFIX="''${WINEMIKU_PREFIX:-''${XDG_DATA_HOME:-$HOME/.local/share}/winemiku/prefix}"' \
           --run 'export WINEMIKU_TEMPLATE="''${WINEMIKU_TEMPLATE:-''${XDG_CACHE_HOME:-$HOME/.cache}/winemiku/prefix-template}"'
       '';
-      winemiku = mkWinemiku wine-miku;
+      # 캐시의 vanilla wine + 패치된 모듈만 (Wine 전체를 다시 빌드하지 않는다)
+      winemiku = mkWinemiku wine-vanilla wine-miku-modules;
       # 패치 없이 캐시의 wine 으로 (빌드 없이 바로 받음. UAC/바로가기 패치 빠짐)
-      winemiku-unpatched = mkWinemiku wine-vanilla;
+      winemiku-unpatched = mkWinemiku wine-vanilla null;
     in {
       packages.${system} = {
         default = winemiku;
-        inherit winemiku winemiku-unpatched wine-miku wine-vanilla winemiku-share winemiku-fonts;
+        inherit winemiku winemiku-unpatched wine-miku wine-miku-modules wine-vanilla winemiku-share winemiku-fonts;
       };
 
       apps.${system}.default = {
