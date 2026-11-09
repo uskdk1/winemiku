@@ -1,0 +1,21 @@
+diff --git a/dlls/gdi32/dc.c b/dlls/gdi32/dc.c
+index adfcd51..c31b89b 100644
+--- a/dlls/gdi32/dc.c
++++ b/dlls/gdi32/dc.c
+@@ -915,10 +915,13 @@ INT WINAPI SetBkMode( HDC hdc, INT mode )
+     DC_ATTR *dc_attr;
+     INT ret;
+ 
+-    if (mode <= 0 || mode > BKMODE_LAST)
++    /* Windows does not reject other values; anything but OPAQUE draws as
++     * transparent (the LINE installer passes a color here and expects
++     * transparent text). */
++    if (mode != OPAQUE && mode != TRANSPARENT)
+     {
+-        SetLastError(ERROR_INVALID_PARAMETER);
+-        return 0;
++        WARN( "invalid mode %d, using TRANSPARENT\n", mode );
++        mode = TRANSPARENT;
+     }
+ 
+     if (is_meta_dc( hdc )) return METADC_SetBkMode( hdc, mode );

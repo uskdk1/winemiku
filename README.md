@@ -118,6 +118,15 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
 - **팝업 메뉴**(`patches/0003`): 활성화되지 않는 팝업(`WS_EX_NOACTIVATE`, 메뉴·툴팁)은 따로 된 Wayland 창이 아니라
   메인 창의 subsurface로 띄운다. Qt 메뉴는 테두리가 없어도 `WS_CAPTION`을 달고 있어 일반 창(xdg_toplevel)으로 판정되는데,
   Wayland에서는 새 창이 무조건 포커스를 가져가서 메뉴가 활성 창이 되고 Qt가 바로 닫았다 (카카오톡: 우클릭 메뉴가 뜨자마자 사라짐).
+- **시스템 DLL 서명**(`patches/0005`): 일부 앱은 시스템 DLL이 "Microsoft Windows" 서명을 가졌는지 검사한다
+  (LINE 설치기: `Security verification failed ... gdiplus.dll NO_SIGNATURE`). Wine 내장 DLL에는 서명이 없어서,
+  **Wine 설치 폴더의 내장 DLL과 바이트 단위로 같은 파일**에만 가짜 서명(PKCS#7, `dlls/wintrust/builtin_sig.h`)을 돌려주고
+  `WinVerifyTrust`도 성공으로 처리한다. 인증서에는 `OU=Wine builtin (not a real Microsoft certificate)`가 붙어 있고,
+  신뢰된 루트에 연결되지 않으며 개인키는 만든 직후 버렸다. 다른 파일(내장 DLL 표시만 흉내 낸 파일 포함)의 검증 결과는 그대로다.
+  로그: `WINEDEBUG=+wintrust`.
+- **SetBkMode 잘못된 값**(`patches/0006`): Windows는 OPAQUE/TRANSPARENT 외의 값을 거부하지 않고 투명으로 그린다.
+  Wine은 거부해서 기본값 OPAQUE가 남았다 (LINE 설치기: 색상값을 넘겨서 "설치" 버튼 글자가 흰 사각형이 됨).
+  이제 그런 값은 TRANSPARENT로 저장한다. 로그: `WINEDEBUG=warn+gdi`.
 - **Wayland 전용**: `DISPLAY`를 지우고 레지스트리 `HKCU\Software\Wine\Drivers\Graphics=wayland`로 고정. XWayland로 빠지지 않음.
 - **한국어**: `LANG/LC_ALL=ko_KR.UTF-8` (코드페이지 949, 비유니코드 앱 대응). 바꾸려면 `WM_LANG=ja_JP.UTF-8 wm-run ...`
 - **폰트**: 앱은 폰트를 이름으로 찾는다. Windows 기본 UI 폰트 이름으로 고정 굵기 Noto를 등록한다

@@ -37,6 +37,9 @@ SUBSTITUTES = {
     "DotumChe": MONO, "돋움체": MONO,
     "BatangChe": MONO, "바탕체": MONO,
     "GungsuhChe": MONO, "궁서체": MONO,
+    # macOS 폰트 이름 (LINE 설치기가 요청). 없으면 Courier New(고정폭)로 떨어진다.
+    # 설치기는 GetGlyphIndices 로 글리프 번호를 얻어 그려서 FontLink 가 안 먹는다 -> 한글이 있는 폰트로
+    "Helvetica Neue": SANS,
 }
 
 # 한글 글리프가 없는 서양 UI 폰트 -> 한글은 Noto 로 폴백
