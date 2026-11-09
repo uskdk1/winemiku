@@ -217,7 +217,7 @@ index 0000000..c029541
 +    0x14, 0xcb, 0x4e,
 +};
 diff --git a/dlls/wintrust/crypt.c b/dlls/wintrust/crypt.c
-index ad6f264..15085df 100644
+index ad6f264..7546850 100644
 --- a/dlls/wintrust/crypt.c
 +++ b/dlls/wintrust/crypt.c
 @@ -32,6 +32,7 @@
@@ -228,7 +228,7 @@ index ad6f264..15085df 100644
  
  #include "wine/debug.h"
  
-@@ -1275,12 +1276,137 @@ CRYPTCATCDF * WINAPI CryptCATCDFOpen(LPWSTR pwszFilePath,
+@@ -1275,12 +1276,167 @@ CRYPTCATCDF * WINAPI CryptCATCDFOpen(LPWSTR pwszFilePath,
      return NULL;
  }
  
@@ -287,7 +287,8 @@ index ad6f264..15085df 100644
 +
 +/* Returns TRUE if the file is an unmodified copy of a Wine builtin module,
 + * i.e. it carries the "Wine builtin DLL" marker and is byte-for-byte identical
-+ * to the module of the same name in one of Wine's dll directories. */
++ * to the module of the same name in one of Wine's dll directories, or of a
++ * native DLL from one of the WINEMIKU_SIGNED_DLL_DIRS directories. */
 +BOOL WINTRUST_IsWineBuiltinFile(HANDLE hfile, const WCHAR *path)
 +{
 +    static const char builtin_signature[] = "Wine builtin DLL";
@@ -317,11 +318,42 @@ index ad6f264..15085df 100644
 +                       NULL, OPEN_EXISTING, 0, NULL);
 +    if (file == INVALID_HANDLE_VALUE) goto done;
 +
++    name = wcsrchr(path, '\\');
++    name = name ? name + 1 : path;
++
 +    if (!ReadFile(file, &dos, sizeof(dos), &read, NULL) || read != sizeof(dos) ||
 +        dos.e_magic != IMAGE_DOS_SIGNATURE ||
-+        !ReadFile(file, marker, sizeof(marker), &read, NULL) || read != sizeof(marker) ||
-+        memcmp(marker, builtin_signature, sizeof(marker)) ||
-+        SetFilePointer(file, dos.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER ||
++        !ReadFile(file, marker, sizeof(marker), &read, NULL) || read != sizeof(marker))
++        goto close;
++
++    if (memcmp(marker, builtin_signature, sizeof(marker)))
++    {
++        /* Not a Wine builtin: native DLLs installed into the prefix by the
++         * launcher (e.g. DXVK) are listed as unix directories in
++         * WINEMIKU_SIGNED_DLL_DIRS, separated by ':'. */
++        WCHAR *p, *next;
++
++        if (!(len = GetEnvironmentVariableW(L"WINEMIKU_SIGNED_DLL_DIRS", NULL, 0))) goto close;
++        if (!(dir = malloc((len + 8) * sizeof(WCHAR)))) goto close;
++        if (!GetEnvironmentVariableW(L"WINEMIKU_SIGNED_DLL_DIRS", dir, len)) goto close;
++        for (p = dir; p && *p && !ret; p = next)
++        {
++            WCHAR *nt_dir, *q;
++
++            if ((next = wcschr(p, ':'))) *next++ = 0;
++            if (*p != '/') continue;
++            if (!(nt_dir = malloc((wcslen(p) + 9) * sizeof(WCHAR)))) break;
++            swprintf(nt_dir, wcslen(p) + 9, L"\\??\\unix%s", p);
++            for (q = nt_dir; *q; q++) if (*q == '/') *q = '\\';
++            ret = builtin_compare_with(file, nt_dir, L"", name);
++            free(nt_dir);
++        }
++        free(dir);
++        dir = NULL;
++        goto close;
++    }
++
++    if (SetFilePointer(file, dos.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER ||
 +        !ReadFile(file, &nt, sizeof(nt), &read, NULL) || read != sizeof(nt) ||
 +        nt.Signature != IMAGE_NT_SIGNATURE)
 +        goto close;
@@ -334,8 +366,6 @@ index ad6f264..15085df 100644
 +    case IMAGE_FILE_MACHINE_ARMNT: arch = L"arm-windows"; break;
 +    default: goto close;
 +    }
-+    name = wcsrchr(path, '\\');
-+    name = name ? name + 1 : path;
 +
 +    for (i = 0; !ret; i++)
 +    {
@@ -367,7 +397,7 @@ index ad6f264..15085df 100644
      HANDLE file;
  
      TRACE("(%p %p %ld %p %p)\n", pSubjectInfo, pdwEncodingType, dwIndex,
-@@ -1295,7 +1421,31 @@ static BOOL WINTRUST_GetSignedMsgFromPEFile(SIP_SUBJECTINFO *pSubjectInfo,
+@@ -1295,7 +1451,31 @@ static BOOL WINTRUST_GetSignedMsgFromPEFile(SIP_SUBJECTINFO *pSubjectInfo,
          if(file == INVALID_HANDLE_VALUE)
              return FALSE;
      }

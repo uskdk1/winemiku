@@ -123,6 +123,8 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
   **Wine 설치 폴더의 내장 DLL과 바이트 단위로 같은 파일**에만 가짜 서명(PKCS#7, `dlls/wintrust/builtin_sig.h`)을 돌려주고
   `WinVerifyTrust`도 성공으로 처리한다. 인증서에는 `OU=Wine builtin (not a real Microsoft certificate)`가 붙어 있고,
   신뢰된 루트에 연결되지 않으며 개인키는 만든 직후 버렸다. 다른 파일(내장 DLL 표시만 흉내 낸 파일 포함)의 검증 결과는 그대로다.
+  prefix에 넣는 native DLL(DXVK의 dxgi·d3d11 등)은 실행기가 원본 폴더를 `WINEMIKU_SIGNED_DLL_DIRS`(`:`로 구분한 unix 경로)로
+  알려주고, 그 폴더의 파일과 똑같을 때만 같은 방식으로 처리한다.
   로그: `WINEDEBUG=+wintrust`.
 - **SetBkMode 잘못된 값**(`patches/0006`): Windows는 OPAQUE/TRANSPARENT 외의 값을 거부하지 않고 투명으로 그린다.
   Wine은 거부해서 기본값 OPAQUE가 남았다 (LINE 설치기: 색상값을 넘겨서 "설치" 버튼 글자가 흰 사각형이 됨).

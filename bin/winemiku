@@ -40,6 +40,9 @@ say() { echo "winemiku: $*" >&2; }
 export WINEPREFIX="${WINEPREFIX:-${WINEMIKU_PREFIX:-$ROOT/prefix}}"
 export WINEMENUBUILDER_LAUNCHER="${WINEMIKU_SELF:-$ROOT/bin/winemiku}"
 export LANG="${WM_LANG:-ko_KR.UTF-8}" LC_ALL="${WM_LANG:-ko_KR.UTF-8}"
+# prefix 에 넣는 native DLL(DXVK)의 원본 폴더. 이 파일들과 똑같은 DLL 은 Wine 내장 DLL 처럼
+# "서명된" 것으로 본다 (patches/0005, wintrust: LINE 설치기가 system DLL 서명을 검사)
+export WINEMIKU_SIGNED_DLL_DIRS="$(readlink -f "$SHARE/dxvk/x64"):$(readlink -f "$SHARE/dxvk/x32")"
 unset DISPLAY
 PREFIX="$WINEPREFIX"
 
