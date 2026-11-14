@@ -18,7 +18,28 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "wiku": "wiku"
+      }
+    },
+    "wiku": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794634154,
+        "narHash": "sha256-nDWoOWoIXbhxC/VsMJhz5zoxw4YLw9PAmFmoQYB8PT8=",
+        "owner": "uskdk1",
+        "repo": "wiku",
+        "rev": "b54e9ea83b19b6f8f3ea87d17530f9d78642e912",
+        "type": "github"
+      },
+      "original": {
+        "owner": "uskdk1",
+        "repo": "wiku",
+        "type": "github"
       }
     }
   },

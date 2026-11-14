@@ -1,6 +1,7 @@
 # winemiku
 
 nixpkgs Wine(`wineWow64Packages.stagingFull`, wine-staging)에 `patches/*.patch`를 얹은 커스텀 Wine.
+[wiku](https://github.com/uskdk1/wiku)(여러 Wine 변형과 prefix 관리)의 변형 `miku`로 만든다 (`flake.nix`의 `wiku.lib.mkWine`).
 
 ## 사용 (Nix)
 
@@ -8,11 +9,23 @@ nixpkgs Wine(`wineWow64Packages.stagingFull`, wine-staging)에 `patches/*.patch`
 nix run github:uskdk1/winemiku -- 설치파일.exe            # 실행 (아래 설정이 모두 적용됨)
 nix run github:uskdk1/winemiku -- --reset                 # prefix 초기화
 nix run github:uskdk1/winemiku -- --kill                  # 남은 Wine 프로세스 종료
-nix profile install github:uskdk1/winemiku               # 설치하면 winemiku 명령으로
+nix profile install github:uskdk1/winemiku               # 설치하면 wiku 명령으로
 ```
 
-- prefix: `~/.local/share/winemiku/prefix` (`WINEPREFIX`로 바꿀 수 있음), 템플릿: `~/.cache/winemiku/prefix-template`
-- Wayland 전용, 한국어 로캘·폰트, DXVK, 트레이 아이콘은 바(waybar 등)에 표시 (아래 "실행 환경" 참고)
+home-manager로 다른 변형·여러 prefix와 같이 쓰기 (wiku README 참고):
+
+```nix
+programs.wiku = {
+  enable = true;
+  wines.miku = inputs.winemiku.packages.x86_64-linux.default;
+  prefixes.kakao.wine = "miku";
+  prefixes.line.wine = "miku";
+};
+```
+
+- prefix: `~/.local/share/wiku/miku` (home-manager에서는 `~/.local/share/wiku/<이름>`), 템플릿: `~/.cache/wiku/templates/`
+- Wayland 전용, 한국어 로캘·폰트, DXVK, 트레이 아이콘은 바(waybar 등)에 표시 (아래 "실행 환경" 참고).
+  Wayland·DXVK·로캘은 wiku 토글이라 prefix마다 바꿀 수 있다 (기본값: `flake.nix`의 `defaults`).
 - `.#winemiku`(기본)는 nixpkgs 캐시의 Wine 위에 패치된 모듈만 덮어쓰고, 패치된 DXVK를 쓴다.
   `.#winemiku-unpatched`는 nixpkgs 캐시의 Wine을 그대로 써서 바로 받지만 `patches/*.patch`(Wine 패치)가 빠진다.
 
@@ -46,12 +59,13 @@ NixOS가 아니면 `/etc/nix/nix.conf`에 같은 내용을 넣거나(`extra-subs
 
 | 패키지 | 내용 |
 |---|---|
-| `winemiku` (기본) | 실행기 + 캐시의 Wine + 패치된 모듈 + 데이터 |
-| `winemiku-unpatched` | 실행기 + 캐시의 Wine(패치 없음) + 데이터 |
+| `winemiku` (기본) | wiku 변형 `miku`: 실행기(wiku) + 캐시의 Wine + 패치된 모듈 + 패치된 DXVK + 데이터 |
+| `winemiku-unpatched` | wiku 변형 `miku-unpatched`: 캐시의 Wine(패치 없음) + 같은 DXVK·데이터 |
 | `wine-miku-modules` | 패치가 건드리는 모듈만 빌드한 결과 (dll·so·wineserver) |
 | `wine-miku` | 패치된 Wine 전체 (약 1시간, 확인용. 배포에는 안 씀) |
-| `winemiku-share` | prefix 데이터 (레지스트리 설정, 폰트, 패치된 DXVK 링크) |
+| `winemiku-reg` | prefix 레지스트리 (`scripts/gen-prefix-reg.py`) |
 | `winemiku-fonts` | prefix용 고정 굵기 폰트 (Segoe UI·Malgun Gothic 이름의 Noto, DejaVu Sans, Arimo) |
+| `winemiku-cjk-fonts` | prefix에 넣는 Noto Sans CJK (Regular·Bold) |
 
 ## 개발
 
@@ -73,7 +87,10 @@ wm-prefix            # 템플릿 버리고 prefix 처음부터 재생성
 ### 실행: wm-run = bin/winemiku
 
 `wm-run`(개발 셸)과 `bin/winemiku`(어디서나, nix develop 불필요)는 같은 실행기다.
-같은 prefix, 같은 Wine(runtime/ + override/), 같은 설정을 쓴다. 차이는 `wm-run`이 runtime/을 먼저 최신화한다는 것뿐.
+같은 prefix, 같은 Wine(runtime/ + override/), 같은 설정을 쓴다. 차이는 `wm-run`이 runtime/과 개발용 설정을 먼저 최신화한다는 것뿐.
+실제로는 wiku 실행기다: `scripts/dev.sh`가 배포용 설정(레지스트리·폰트·DXVK·env는 store)에서 wine만 `runtime/`으로,
+prefix는 `./prefix`, `override/` 반영을 켠 설정을 `.cache/wiku-dev.json`에 만들고, `bin/winemiku`가 그 설정으로 wiku를 부른다.
+`bin/winemiku list`, `bin/winemiku wines`도 된다.
 
 ```bash
 bin/winemiku "C:\\users\\miku\\Desktop\\카카오톡.lnk"   # 설치한 앱 (바로가기 .lnk 또는 .exe)
@@ -84,16 +101,16 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
 ```
 
 앱 메뉴 바로가기(`~/.local/share/applications/wine/…`)도 `bin/winemiku`를 부른다
-(patches/0002: `WINEMENUBUILDER_LAUNCHER`). `runtime/`·폰트는 `.gcroots/`로 GC에서 보호된다.
+(patches/0002: `WINEMENUBUILDER_LAUNCHER`). vanilla wine과 wiku 패키지(데이터 포함)는 `.gcroots/`로 GC에서 보호된다.
 
 ### prefix 초기화
 
 - `rm -rf prefix/drive_c` 해도 된다. 다음 실행 때 prefix 전체(레지스트리 포함)를 새로 만든다.
-- 새 prefix는 `.cache/prefix-template`(깨끗한 prefix + 한글/Wayland 설정)에서 btrfs reflink로 복사해서 거의 즉시 생긴다.
+- 새 prefix는 `.cache/templates/<key>`(깨끗한 prefix + 한글/Wayland 설정)에서 btrfs reflink로 복사해서 거의 즉시 생긴다.
   템플릿은 Wine 버전·설정이 바뀌면 자동으로 다시 만든다(그때만 ~20초).
 - 초기화할 때 이 prefix를 가리키는 앱 메뉴 항목(`.desktop`, `.menu`)도 지운다. 다른 prefix 것은 건드리지 않는다.
-- 안전장치: winemiku가 만든 prefix(`.wm-prefix` 표시)만 지운다.
-- Wine 기본 파일 연결(`wine-extension-*.desktop`)은 만들지 않는다. 이 파일들은 이름이 prefix끼리 공유돼서 서로 덮어쓴다.
+- 안전장치: wiku(또는 예전 winemiku)가 만든 prefix(`.wiku-prefix`/`.wm-prefix` 표시)만 지운다.
+- Wine 기본 파일 연결(`wine-extension-*.desktop`)은 만들지 않는다 (wiku `fileAssoc` 기본값 끔). 이 파일들은 이름이 prefix끼리 공유돼서 서로 덮어쓴다.
 
 ### 실행 환경 (wm-run)
 
@@ -129,8 +146,8 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
 - **SetBkMode 잘못된 값**(`patches/0006`): Windows는 OPAQUE/TRANSPARENT 외의 값을 거부하지 않고 투명으로 그린다.
   Wine은 거부해서 기본값 OPAQUE가 남았다 (LINE 설치기: 색상값을 넘겨서 "설치" 버튼 글자가 흰 사각형이 됨).
   이제 그런 값은 TRANSPARENT로 저장한다. 로그: `WINEDEBUG=warn+gdi`.
-- **Wayland 전용**: `DISPLAY`를 지우고 레지스트리 `HKCU\Software\Wine\Drivers\Graphics=wayland`로 고정. XWayland로 빠지지 않음.
-- **한국어**: `LANG/LC_ALL=ko_KR.UTF-8` (코드페이지 949, 비유니코드 앱 대응). 바꾸려면 `WM_LANG=ja_JP.UTF-8 wm-run ...`
+- **Wayland 전용** (wiku `wayland` 토글): `DISPLAY`를 지우고 레지스트리 `HKCU\Software\Wine\Drivers\Graphics=wayland`로 고정. XWayland로 빠지지 않음.
+- **한국어** (wiku `locale`): `LANG/LC_ALL=ko_KR.UTF-8` (코드페이지 949, 비유니코드 앱 대응). 바꾸려면 `WIKU_LANG=ja_JP.UTF-8 wm-run ...`
 - **폰트**: 앱은 폰트를 이름으로 찾는다. Windows 기본 UI 폰트 이름으로 고정 굵기 Noto를 등록한다
   ([scripts/gen-fonts.py](scripts/gen-fonts.py), Nix가 빌드).
   - `Segoe UI` = Noto Sans, `Malgun Gothic` = Noto Sans CJK KR. 굴림·돋움·바탕 등은 Malgun Gothic으로 대체(FontSubstitutes).
@@ -142,17 +159,18 @@ bin/winemiku --kill-all                                  # 이 저장소 Wine으
   - Wine의 DirectWrite는 레지스트리 FontSubstitutes를 보지 않고(Qt와 GDI는 봄), prefix `Fonts/`의 파일도
     `HKLM\...\Fonts`에 등록된 것만 본다. 그래서 대체가 아니라 폰트 이름 자체를 바꿔 등록한다.
   - 서양 UI 폰트에는 한글 폴백(FontLink)도 건다(GDI용). 설정 내용은 [scripts/gen-prefix-reg.py](scripts/gen-prefix-reg.py).
-    이 파일을 고치면 다음 실행 때 자동 재적용.
+    이 파일을 고치면 (Nix가 다시 만든 뒤) 다음 실행 때 자동 재적용. 개발 셸에서는 `nix develop`을 다시 하면 된다.
 - 터미널로 파이프한 출력(`wm-run reg query ... | less` 등)은 CP949라 깨져 보인다. `| iconv -f CP949`를 붙일 것.
 
 `wm-run`은 `runtime/`(vanilla wine의 심볼릭 링크 복제본, 내장 Tahoma·Arial 제외)에 `override/`의 DLL을 끼워 넣어 실행합니다.
-배포판(`nix run`)도 같은 방식이다. `flake.nix`의 `wineRuntime`이 vanilla wine 복제본에 `wine-miku-modules`를 덮어쓴다.
+배포판(`nix run`)도 같은 방식이다. wiku의 `mkWine`이 vanilla wine 복제본에 `wine-miku-modules`를 덮어쓴다.
 `wine-miku-modules`는 같은 소스에 패치를 적용하고 configure한 뒤, 패치 파일의 `diff --git a/` 경로에서 뽑은 모듈
 (`dlls/<이름>`, `programs/<이름>`, `server`)만 `make`한다. 그래서 패치를 바꿔도 Wine 전체를 다시 컴파일하지 않는다.
 Wine은 설치 디렉터리를 `WINEDLLPATH`보다 먼저 찾기 때문에 `WINEDLLPATH`로는 빌트인 DLL을 덮어쓸 수 없습니다.
 
 - 새로 추가한 소스 파일은 `wm-patch` 전에 `git -C src/wine-* add <파일>` 필요.
 - 패치를 추가/변경한 뒤 `nix build`로 확인(약 4분). 모듈 목록 확인: `nix eval .#wine-miku-modules.buildPhase`
+- wiku를 고쳤으면 push 후 `nix flake update wiku`. 로컬에서 바로 시험: `nix build .#winemiku --override-input wiku path:/home/miku/wiku`
 - 헤더(`include/`)나 여러 모듈이 같이 쓰는 코드를 고치는 패치는 모듈만 덮어쓰면 안 맞을 수 있다. 그때는 `nix build .#wine-miku`(전체)로 확인할 것.
 - 소스를 처음부터 다시: `rm -rf src && wm-prepare`
 - 로딩 확인: `WINEDEBUG=+loaddll wm-run app.exe`

@@ -70,11 +70,15 @@ wm-build() {
     done
 }
 
-# runtime/ = vanilla wine 의 심볼릭 링크 복제본 (+ 실행 시 bin/winemiku 가 override/ 를 반영).
+# runtime/ = vanilla wine 의 심볼릭 링크 복제본 (+ 실행 시 wiku 가 override/ 를 반영).
 # Wine 은 ntdll.so 의 realpath 기준 디렉터리를 WINEDLLPATH 보다 먼저 찾기 때문에
 # (dlls/ntdll/unix/loader.c set_dll_path) WINEDLLPATH 로는 빌트인 DLL 을 덮어쓸 수 없다.
 # 그래서 wine 실행파일과 ntdll.so 만 실제 복사해서 기준 디렉터리를 runtime/ 으로 옮긴다.
-# bin/winemiku 가 nix develop 없이 쓸 수 있게 prefix.reg(생성된 레지스트리)와 cjk-fonts 링크도 여기 둔다.
+# (배포용은 wiku 의 mkWine 이 같은 방식으로 store 에 만든다)
+#
+# 실행은 wiku 실행기가 한다. 배포용 설정(WM_WIKU_CONFIG: prefix 레지스트리·폰트·DXVK·env 는 store)에서
+# wine 만 runtime/ 으로, prefix 는 ./prefix, override/ 반영을 켠 개발용 설정을 .cache/ 에 만든다.
+# bin/winemiku 가 nix develop 없이 그 설정으로 실행한다 (앱 바로가기도 이걸 부른다).
 WM_RUNTIME="$WM_ROOT/runtime"
 _wm_runtime() {
     if [ "$(cat "$WM_RUNTIME/.vanilla" 2>/dev/null)" != "$WINE_VANILLA" ]; then
@@ -89,21 +93,36 @@ _wm_runtime() {
         python3 -I "$WM_ROOT/scripts/rewrap.py" "$WINE_VANILLA" "$WM_RUNTIME" >/dev/null || return 1
         echo "$WINE_VANILLA" > "$WM_RUNTIME/.vanilla"
     fi
-    _wm_gcroot wine "$WINE_VANILLA"
-    _wm_gcroot cjk-fonts "${WM_CJK_FONTS%/share/*}"
-    _wm_gcroot dxvk "$WM_DXVK"
-    _wm_gcroot fonts "$WM_FONTS"
-    ln -sfn "$WM_CJK_FONTS" "$WM_RUNTIME/cjk-fonts"
-    ln -sfn "$WM_FONTS" "$WM_RUNTIME/fonts"
-    ln -sfn "$WM_DXVK" "$WM_RUNTIME/dxvk"
-    # 내장 Tahoma/Arial 빼기 (flake.nix wineRuntime 과 같은 이유)
+    # 내장 Tahoma/Arial 빼기 (flake.nix runtimeHook 과 같은 이유)
     rm -f "${WM_RUNTIME:?}"/share/wine/fonts/{tahoma,tahomabd,arial}.ttf
-    python3 -I "$WM_ROOT/scripts/gen-prefix-reg.py" "$WM_RUNTIME/prefix.reg.new" || return 1
-    if cmp -s "$WM_RUNTIME/prefix.reg.new" "$WM_RUNTIME/prefix.reg"; then
-        rm -f "$WM_RUNTIME/prefix.reg.new"
-    else
-        mv "$WM_RUNTIME/prefix.reg.new" "$WM_RUNTIME/prefix.reg"
-    fi
+    # 예전 bin/winemiku 가 쓰던 데이터 (이제 wiku 가 store 에서 직접 쓴다)
+    rm -f "$WM_RUNTIME/prefix.reg" "$WM_RUNTIME/cjk-fonts" "$WM_RUNTIME/fonts" "$WM_RUNTIME/dxvk"
+    _wm_gcroot wine "$WINE_VANILLA"
+    _wm_gcroot wiku "$WM_WIKU"
+    _wm_dev_config
+}
+
+# 개발용 wiku 설정 (.cache/wiku-dev.json) + 그 설정으로 wiku 를 부르는 실행기 (.cache/wiku-dev)
+WM_DEV="$WM_ROOT/.cache/wiku-dev"
+_wm_dev_config() {
+    mkdir -p "$WM_ROOT/.cache"
+    PATH="$WM_WIKU_PATH:$PATH" jq \
+        --arg rt "$WM_RUNTIME" --arg p "$WM_ROOT/prefix" --arg o "$WM_OVERRIDE" '
+        .wines.miku.runtime = $rt
+        | .prefixes.miku.path = $p
+        | .prefixes.miku.override = $o' "$WM_WIKU_CONFIG" > "$WM_DEV.json.new" || return 1
+    mv -f "$WM_DEV.json.new" "$WM_DEV.json"
+    cat > "$WM_DEV.new" <<EOF
+#!/bin/sh
+# scripts/dev.sh 가 만든다: 개발용 설정으로 wiku 실행 (bin/winemiku 가 부른다)
+export PATH="$WM_WIKU_PATH:\$PATH"
+export WIKU_CONFIG="$WM_DEV.json"
+export WIKU_USER_CONFIG="$WM_ROOT/.cache/wiku-dev-user.json"
+export WIKU_TEMPLATES="$WM_ROOT/.cache/templates"
+export WIKU_SELF="$WM_ROOT/bin/winemiku"
+exec "$WM_WIKU/libexec/wiku" "\$@"
+EOF
+    chmod +x "$WM_DEV.new" && mv -f "$WM_DEV.new" "$WM_DEV"
 }
 
 # nix-collect-garbage 에서 보호 (.gcroots/<이름> -> store 경로)
@@ -113,27 +132,30 @@ _wm_gcroot() {
     nix-store --add-root "$WM_ROOT/.gcroots/$1" --realise "$2" >/dev/null
 }
 
-# 실행은 전부 bin/winemiku 가 한다 (Wayland, 한국어, override 반영, prefix 자동 생성).
+# 실행은 전부 bin/winemiku (-> 개발용 wiku) 가 한다 (Wayland, 한국어, override 반영, prefix 자동 생성).
 # 앱 바로가기도 같은 실행기를 쓴다. 예: wm-run winecfg
 wm-run() {
     _wm_runtime || return 1
-    "$WM_ROOT/bin/winemiku" "$@"
+    "$WM_ROOT/bin/winemiku" miku "$@"
 }
 
 # 이 prefix 의 Wine 프로세스 종료 (트레이에 숨은 앱 포함). 모든 prefix: wm-kill --all
 wm-kill() {
-    if [ "$1" = --all ]; then "$WM_ROOT/bin/winemiku" --kill-all; else "$WM_ROOT/bin/winemiku" --kill; fi
+    _wm_runtime || return 1
+    if [ "$1" = --all ]; then "$WM_ROOT/bin/winemiku" --kill-all; else "$WM_ROOT/bin/winemiku" miku --kill; fi
 }
 
 # prefix 초기화 (drive_c + 레지스트리 + 이 prefix 의 메뉴 항목). 템플릿에서 즉시 다시 만든다
 wm-clean() {
     _wm_runtime || return 1
-    "$WM_ROOT/bin/winemiku" --reset "$@"
+    "$WM_ROOT/bin/winemiku" miku --reset "$@"
 }
 
-# prefix 기본 설정(gen-prefix-reg.py)을 처음부터 다시: 템플릿 버리고 prefix 재생성
+# 템플릿 버리고 prefix 처음부터 재생성.
+# (prefix 레지스트리·폰트는 store 에서 오므로 scripts/gen-prefix-reg.py 를 고쳤으면 nix develop 을 다시 할 것.
+#  내용이 바뀌면 템플릿 key 도 바뀌어서 wm-clean 만으로도 새로 만든다)
 wm-prefix() {
-    rm -rf "$WM_ROOT/.cache/prefix-template"
+    rm -rf "$WM_ROOT/.cache/templates" "$WM_ROOT/.cache/prefix-template"
     wm-clean
 }
 

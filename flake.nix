@@ -1,15 +1,22 @@
 {
-  description = "winemiku - 커스텀 패치를 얹은 Wine (Wayland, 한국어, DXVK)";
+  description = "winemiku - 커스텀 패치를 얹은 Wine (Wayland, 한국어, DXVK). wiku 변형";
 
-  # 빌드된 wine-miku 를 받는 바이너리 캐시 (없으면 직접 빌드: 1시간 가까이)
+  # 빌드된 패치 모듈·DXVK 를 받는 바이너리 캐시 (없으면 직접 빌드: 모듈 약 4분 + DXVK 약 10분)
   nixConfig = {
     extra-substituters = [ "https://winemiku.cachix.org" ];
     extra-trusted-public-keys = [ "winemiku.cachix.org-1:BbEx+MwxsPdW3eekGCtxLQZlyemmnOXwvpgCijKVfxk=" ];
   };
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Wine 변형·prefix 관리 틀 (모듈만 빌드, runtime, DXVK, prefix, wiku 명령).
+    wiku = {
+      url = "github:uskdk1/wiku";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, wiku }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -18,83 +25,13 @@
       # nixpkgs 캐시에 있는 빌드된 wine (개발 중 실행용, 컴파일 없음)
       wine-vanilla = pkgs.wineWow64Packages.stagingFull;
 
-      # patches/ 안의 *.patch 를 이름순으로 자동 적용
-      myPatches =
-        let files = builtins.attrNames (builtins.readDir ./patches);
-        in map (f: ./patches + "/${f}")
-          (lib.sort lib.lessThan (lib.filter (lib.hasSuffix ".patch") files));
-
-      # 패치 적용된 전체 wine (전체 빌드 약 1시간. 배포용은 아래 wine-miku-modules 를 쓴다)
-      wine-miku = wine-vanilla.overrideAttrs (o: {
-        pname = "wine-miku";
-        patches = (o.patches or [ ]) ++ myPatches;
-      });
-
-      # 패치가 건드리는 모듈: patches/*.patch 의 "diff --git a/<경로>" 에서
-      # dlls/<이름>, programs/<이름>, server 를 뽑는다
-      patchedModules = lib.unique (lib.concatMap
-        (p: lib.concatMap
-          (l:
-            let m = builtins.match "diff --git a/((dlls|programs)/[^/]+|server)/.*" l;
-            in lib.optional (m != null) (builtins.head m))
-          (lib.splitString "\n" (builtins.readFile p)))
-        myPatches);
-
-      # 패치된 모듈만 빌드 (같은 소스·패치·configure 에서 make <모듈>/all 만. 몇 분)
-      # 결과: lib/wine/{x86_64,i386}-windows/*.dll|exe|drv, lib/wine/x86_64-unix/*.so, bin/wineserver
-      wine-miku-modules = wine-miku.overrideAttrs (o: {
-        pname = "wine-miku-modules";
-        buildPhase = ''
-          runHook preBuild
-          make -j$NIX_BUILD_CORES ${lib.concatMapStringsSep " " (m: "${m}/all") patchedModules}
-          runHook postBuild
-        '';
-        installPhase = ''
-          runHook preInstall
-          for d in ${toString patchedModules}; do
-            if [ "$d" = server ]; then
-              install -Dm755 server/wineserver $out/bin/wineserver; continue
-            fi
-            top=''${d%%/*} name=''${d#*/}
-            case "$name" in
-              *.*) mod=$name ;;
-              *) if [ "$top" = programs ]; then mod=$name.exe; else mod=$name.dll; fi ;;
-            esac
-            so=''${mod%.*}.so n=0
-            for arch in x86_64-windows i386-windows; do
-              if [ -f "$d/$arch/$mod" ]; then
-                install -Dm644 "$d/$arch/$mod" "$out/lib/wine/$arch/$mod"; n=$((n + 1))
-              fi
-            done
-            if [ -f "$d/$so" ]; then
-              install -Dm755 "$d/$so" "$out/lib/wine/x86_64-unix/$so"; n=$((n + 1))
-            fi
-            [ $n -gt 0 ] || { echo "$d: 빌드 결과물이 없음" >&2; exit 1; }
-          done
-          runHook postInstall
-        '';
-        postInstall = "";
-        doCheck = false;
-        doInstallCheck = false;
-      });
-
       # 한글 폰트 (static 버전: Wine 은 가변 폰트 처리가 불완전)
       cjkFonts = "${pkgs.noto-fonts-cjk-sans-static}/share/fonts/opentype/noto-cjk";
-      # D3D8/9/10/11 -> Vulkan. Wayland 에서 wined3d(D3D->OpenGL)는 화면 갱신이 안 되는 앱이 있음 (카카오톡)
-      # patches/dxvk/*.patch 를 이름순으로 적용 (예: 카카오톡 큰 이미지 축소 시 자동 mipmap)
-      dxvkPatches =
-        let files = builtins.attrNames (builtins.readDir ./patches/dxvk);
-        in map (f: ./patches/dxvk + "/${f}")
-          (lib.sort lib.lessThan (lib.filter (lib.hasSuffix ".patch") files));
-      patchDxvk = d: d.overrideAttrs (o: {
-        pname = "dxvk-miku";
-        patches = (o.patches or [ ]) ++ dxvkPatches;
-      });
-      dxvk = pkgs.runCommand "dxvk-miku-${pkgs.dxvk.version}-bin" { } ''
+      # prefix 에 넣는 CJK 폰트는 Regular·Bold 두 개만 (FontLink 의 고정폭 글꼴 등)
+      winemiku-cjk-fonts = pkgs.runCommand "winemiku-cjk-fonts" { } ''
         mkdir -p $out
-        ln -s ${patchDxvk pkgs.dxvk.dxvk64}/bin $out/x64
-        ln -s ${patchDxvk pkgs.dxvk.dxvk32}/bin $out/x32
-      ''; # x64/ x32/ 에 DLL
+        ln -s ${cjkFonts}/NotoSansCJK-Regular.ttc ${cjkFonts}/NotoSansCJK-Bold.ttc $out/
+      '';
 
       # Arimo (Arial 대체, Google Fonts. 가변 폰트 -> gen-fonts.py 가 고정 굵기로)
       arimo = pkgs.fetchurl {
@@ -114,80 +51,65 @@
           ${arimo} $out
       '';
 
-      # bin/winemiku 가 prefix 에 적용하는 데이터: 레지스트리 설정, 폰트, DXVK
-      winemiku-share = pkgs.runCommand "winemiku-share" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+      # prefix 레지스트리 (폰트 등록·대체·FontLink, 트레이 창 끄기). scripts/gen-prefix-reg.py
+      # (Wayland 드라이버, DXVK override, winemenubuilder 옵션은 wiku 토글이 한다)
+      winemiku-reg = pkgs.runCommand "winemiku-reg" { nativeBuildInputs = [ pkgs.python3 ]; } ''
         mkdir -p $out
         python3 -I ${./scripts/gen-prefix-reg.py} $out/prefix.reg
-        ln -s ${cjkFonts} $out/cjk-fonts
-        ln -s ${winemiku-fonts} $out/fonts
-        ln -s ${dxvk} $out/dxvk
       '';
 
-      # 실행용 wine: 빌드된 wine 의 심볼릭 링크 복제본에서 내장 Tahoma/Arial 만 뺀다 (컴파일 없음).
-      # 내장본은 작은 글씨가 깨지는 대체품이라 prefix.reg 의 Replacements 로 Segoe UI(Noto Sans)에
-      # 연결하는데, 같은 이름의 폰트가 있으면 Wine 이 Replacements 를 무시한다.
-      # Wine 은 ntdll.so 의 실제 위치 기준으로 share/wine 을 찾으므로 실행파일과 ntdll.so 는 복사
-      # (개발 모드 runtime/ 과 같은 방식, scripts/dev.sh _wm_runtime).
-      # modules(wine-miku-modules 등)가 있으면 그 파일들을 덮어쓴다 (개발 모드의 override/ 와 같은 방식).
-      # .vanilla 에 modules 도 적어서 모듈이 바뀌면 bin/winemiku 가 prefix 를 갱신한다.
-      wineRuntime = wine: modules: pkgs.runCommand "${wine.name}-runtime"
-        { nativeBuildInputs = [ pkgs.python3 ]; passthru = { inherit (wine) version; }; } ''
-        cp -rs ${wine}/. $out && chmod -R u+w $out
-        for f in bin/wine bin/.wine lib/wine/x86_64-unix/{wine,wine-preloader,ntdll.so}; do
-          [ -e ${wine}/$f ] || continue
-          rm -f $out/$f; cp -L ${wine}/$f $out/$f
-        done
-        python3 -I ${./scripts/rewrap.py} ${wine} $out
-        rm -f $out/share/wine/fonts/{tahoma,tahomabd,arial}.ttf
-        ${lib.optionalString (modules != null) ''
-          (cd ${modules} && find . -type f) | while read -r f; do
-            rm -f $out/$f; install -Dm755 ${modules}/$f $out/$f
-          done
-        ''}
-        echo ${wine}${lib.optionalString (modules != null) " ${modules}"} > $out/.vanilla
-      '';
+      # 두 변형의 공통 설정
+      common = {
+        inherit pkgs;
+        base = wine-vanilla;
+        prefix = {
+          reg = "${winemiku-reg}/prefix.reg";
+          fonts = [ winemiku-fonts winemiku-cjk-fonts ];
+        };
+        # 내장 Tahoma/Arial 빼기: Wine 이 만든 대체품이라 작은 글씨가 깨진다. prefix.reg 의
+        # Replacements 로 DejaVu Sans / Arimo 에 연결하는데, 같은 이름의 폰트가 있으면 무시된다
+        runtimeHook = "rm -f $out/share/wine/fonts/{tahoma,tahomabd,arial}.ttf";
+        # patches/0005: prefix 에 넣은 DXVK DLL 도 "서명된" 것으로 본다 (LINE 설치기)
+        env = { dxvk, ... }: { WINEMIKU_SIGNED_DLL_DIRS = "${dxvk.x64}:${dxvk.x32}"; };
+        defaults = { locale = "ko_KR.UTF-8"; wayland = true; dxvk = true; };
+      };
 
-      # 배포용: 실행기 + 패치된 wine + 데이터. nix run 으로 바로 쓴다.
-      # prefix 는 ~/.local/share/winemiku/prefix, 템플릿은 ~/.cache/winemiku/prefix-template
-      mkWinemiku = wine: modules: pkgs.runCommand "winemiku-${wine.version}"
-        {
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          meta.mainProgram = "winemiku";
-          passthru = { inherit wine modules; share = winemiku-share; };
-        } ''
-        install -Dm755 ${./bin/winemiku} $out/libexec/winemiku
-        patchShebangs $out/libexec/winemiku
-        makeWrapper $out/libexec/winemiku $out/bin/winemiku \
-          --prefix PATH : ${lib.makeBinPath (with pkgs; [ coreutils findutils gnugrep gnused procps diffutils ])} \
-          --set WINEMIKU_WINE ${wineRuntime wine modules} \
-          --set WINEMIKU_SHARE ${winemiku-share} \
-          --set WINEMIKU_OVERRIDE "" \
-          --set WINEMIKU_SELF $out/bin/winemiku \
-          --run 'export WINEMIKU_PREFIX="''${WINEMIKU_PREFIX:-''${XDG_DATA_HOME:-$HOME/.local/share}/winemiku/prefix}"' \
-          --run 'export WINEMIKU_TEMPLATE="''${WINEMIKU_TEMPLATE:-''${XDG_CACHE_HOME:-$HOME/.cache}/winemiku/prefix-template}"'
-      '';
       # 캐시의 vanilla wine + 패치된 모듈만 (Wine 전체를 다시 빌드하지 않는다)
-      winemiku = mkWinemiku wine-vanilla wine-miku-modules;
-      # 패치 없이 캐시의 wine 으로 (빌드 없이 바로 받음. UAC/바로가기 패치 빠짐)
-      winemiku-unpatched = mkWinemiku wine-vanilla null;
-    in {
+      # + patches/dxvk/*.patch 를 얹은 DXVK
+      winemiku = wiku.lib.mkWine (common // {
+        name = "miku";
+        patches = wiku.lib.patchesIn ./patches;
+        dxvkPatches = wiku.lib.patchesIn ./patches/dxvk;
+      });
+      # 패치 없이 캐시의 wine 으로 (빌드 없이 바로 받음. UAC/바로가기 등 Wine 패치 빠짐, DXVK 는 같은 것)
+      winemiku-unpatched = wiku.lib.mkWine (common // {
+        name = "miku-unpatched";
+        inherit (winemiku) dxvk;
+      });
+    in
+    {
       packages.${system} = {
         default = winemiku;
-        inherit winemiku winemiku-unpatched wine-miku wine-miku-modules wine-vanilla winemiku-share winemiku-fonts;
+        inherit winemiku winemiku-unpatched wine-vanilla winemiku-fonts winemiku-cjk-fonts winemiku-reg;
+        # 패치된 Wine 전체 (약 1시간, 확인용. 배포에는 안 씀)
+        wine-miku = winemiku.wine-full;
+        # 패치가 건드리는 모듈만 빌드한 결과 (dll·so·wineserver)
+        wine-miku-modules = winemiku.modules;
       };
 
       apps.${system}.default = {
         type = "app";
-        program = "${winemiku}/bin/winemiku";
+        program = "${winemiku}/bin/wiku";
       };
 
       # 개발 셸: wine 빌드 의존성 전부 + 실행용 vanilla wine + 헬퍼 함수
-      devShells.${system}.default = wine-miku.overrideAttrs (o: {
+      devShells.${system}.default = winemiku.wine-full.overrideAttrs (o: {
         nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ pkgs.git ];
         WINE_VANILLA = wine-vanilla;
-        WM_CJK_FONTS = cjkFonts;
-        WM_FONTS = winemiku-fonts;
-        WM_DXVK = dxvk;
+        # wm-run 은 wiku 실행기를 개발용 설정(runtime/, override/, ./prefix)으로 부른다
+        WM_WIKU = winemiku;
+        WM_WIKU_CONFIG = winemiku.config;
+        WM_WIKU_PATH = winemiku.path;
         shellHook = ''
           source ${./scripts/dev.sh}
         '';

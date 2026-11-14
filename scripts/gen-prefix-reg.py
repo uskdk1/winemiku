@@ -3,13 +3,16 @@
 
 - 폰트: scripts/gen-fonts.py 가 만든 폰트를 등록하고, Windows 기본 한글 폰트 이름은
   Malgun Gothic 으로 대체, Tahoma -> DejaVu Sans, Arial -> Arimo + FontLink
-- Wayland 전용: Graphics 드라이버를 wayland 로 고정
+- 트레이: explorer 의 대체 트레이 창 끄기 (patches/0004 가 바로 보낸다)
+
+Wayland 드라이버(Graphics), DXVK DllOverrides, winemenubuilder 옵션은 wiku 토글이 한다
+(flake.nix defaults: wayland, dxvk. fileAssoc 는 wiku 기본값 끔). wiku 는 이 파일 다음에 자기 것을 적용한다.
 
 사용법: gen-prefix-reg.py <출력.reg>
 """
 import sys
 
-# scripts/gen-fonts.py 결과 (bin/winemiku 가 prefix 의 Fonts/ 에 링크): 이름 -> 파일
+# scripts/gen-fonts.py 결과 (wiku 가 prefix 의 Fonts/ 에 링크): 이름 -> 파일
 FONTS = {
     "Segoe UI": "segoeui.ttf", "Segoe UI Bold": "segoeuib.ttf",          # Noto Sans
     "Malgun Gothic": "malgun.otf", "Malgun Gothic Bold": "malgunbd.otf",  # Noto Sans CJK KR
@@ -72,7 +75,7 @@ def main() -> None:
         # 이제 진짜 폰트가 있다. 예전 prefix 의 "Malgun Gothic" -> Noto Sans CJK KR 대체를 지운다
         '"Malgun Gothic"=-',
         "",
-        # 내장 Tahoma/Arial 은 runtime 에서 빼고(flake.nix wineRuntime, scripts/dev.sh) 이 이름들을
+        # 내장 Tahoma/Arial 은 runtime 에서 빼고(flake.nix runtimeHook, scripts/dev.sh) 이 이름들을
         # 다른 폰트로 연결한다. 같은 이름의 폰트가 있으면 무시되므로(GDI·DirectWrite 모두) 빼야 한다.
         r"[HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements]",
         *(f"{q(k)}={q(v)}" for k, v in REPLACEMENTS.items()),
@@ -81,24 +84,11 @@ def main() -> None:
         *(f"{q(k)}={multi_sz([LINK_SANS_FONT])}" for k in LINK_SANS),
         *(f"{q(k)}={multi_sz([LINK_MONO_FONT])}" for k in LINK_MONO),
         "",
-        r"[HKEY_CURRENT_USER\Software\Wine\Drivers]",
-        f'"Graphics"={q("wayland")}',
-        "",
-        # DXVK (bin/winemiku 가 system32/syswow64 에 DLL 을 넣는다): native 우선
-        r"[HKEY_CURRENT_USER\Software\Wine\DllOverrides]",
-        *(f'"{dll}"="native,builtin"' for dll in ("d3d8", "d3d9", "d3d10core", "d3d11", "dxgi")),
-        "",
         # 트레이 아이콘은 patches/0004 가 바(StatusNotifierItem)로 보낸다. 그게 안 될 때(세션 버스 없음)
         # explorer 가 대신 띄우는 작은 트레이 창(Shell_TrayWnd)은 진짜 창이 되어 포커스를 뺏는다
         # (SWP_NOACTIVATE 무시). 끈다.
         r"[HKEY_CURRENT_USER\Software\Wine\Explorer]",
         '"ShowSystray"=dword:00000000',
-        "",
-        # 기본값 "winemenubuilder.exe -a -r": 세션 시작마다 -a 가 Wine 기본 파일 연결
-        # (~/.local/share/applications/wine-extension-*.desktop)을 다시 만드는데, 파일 이름이
-        # prefix 간에 공유돼서 마지막에 실행한 prefix 가 덮어쓴다. -r(지워진 앱 메뉴 정리)만 남긴다.
-        r"[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\RunServices]",
-        f'"winemenubuilder"={q(r"C:\windows\system32\winemenubuilder.exe -r")}',
         "",
     ]
     with open(sys.argv[1], "w", encoding="utf-16", newline="\r\n") as f:
