@@ -13,6 +13,7 @@
 | [0004](#0004-winewayland-systray-sni) | winewayland.drv | 트레이 아이콘을 StatusNotifierItem(D-Bus)으로 |
 | [0005](#0005-wintrust-builtin-signature) | wintrust | 내장 DLL에 가짜 "Microsoft Windows" 서명 |
 | [0006](#0006-gdi32-setbkmode-invalid) | gdi32 | `SetBkMode`에 이상한 값을 주면 투명으로 |
+| [0007](#0007-winewayland-systray-menu-probe) | winewayland.drv | 바가 클릭 좌표를 안 주면(wayle) 트레이 메뉴를 포인터 위치에 |
 | [dxvk 0001](#dxvk-0001-d3d11-auto-generate-mips) | DXVK d3d11 | 큰 이미지를 작게 그릴 때 숨은 mipmap |
 
 ---
@@ -103,6 +104,28 @@ Wine은 `ERROR_INVALID_PARAMETER`로 거부해서 기본값 OPAQUE가 남았다.
 **수정** (`dlls/gdi32/dc.c`): 그런 값은 `WARN`을 남기고 TRANSPARENT로 저장한다.
 
 **확인**: `WINEDEBUG=warn+gdi`.
+
+---
+
+## 0007 winewayland-systray-menu-probe
+
+**문제**: 바를 waybar에서 wayle로 바꾸니 카카오톡 트레이 우클릭 메뉴가 첫 모니터 왼쪽 위 구석에 뜬다.
+
+**원인**: 0004는 SNI 호스트가 `ContextMenu(x, y)`로 넘기는 좌표에 메뉴를 놓는다. waybar는 실제 화면 좌표를 보내지만
+wayle(0.7.1)은 모든 클릭에 `(0, 0)`을 보낸다. (0, 0)은 첫 출력의 왼쪽 위다.
+
+**수정** (`wayland_surface.c`, `wayland_pointer.c`): 좌표가 (0, 0)이면 모르는 것으로 보고 포인터 위치를 쓴다.
+Wayland에서 전역 포인터 위치는 알 수 없지만, 클릭 직후 포인터는 아직 아이콘 위에 있다.
+- 메뉴 창의 layer 표면을 바로 만들지 않고(`layer_pending`), 0004의 투명 막(catcher)을 **모든 출력에** overlay 레이어·exclusive zone -1로 깐다.
+  바까지 덮으므로 컴포지터가 포인터 enter를 막에 보내고, 그 표면 좌표가 곧 출력 좌표다 (`wayland_surface_catcher_enter`).
+- 거기에 메뉴의 layer 표면을 만들고 바로 첫 commit을 한다. 다른 출력의 막은 지우고, 남은 막은 전처럼 top 레이어·exclusive zone 0으로 되돌린다.
+- 막 생성이 실패하면(viewporter 없음 등) 전처럼 첫 출력의 (0, 0)에 띄운다. 컴포지터가 새 표면에 enter를 안 보내면 마우스를 움직일 때 뜬다.
+- 막은 여러 개가 될 수 있어 `wayland_catcher` 목록으로 바꿨고, 포인터의 `focused_catcher`는 BOOL에서 그 `wl_surface`로 바꿨다 (어느 막을 지우는지 구분).
+
+좌표를 제대로 주는 바(waybar)는 전과 같은 경로다.
+
+**확인**: `WINEDEBUG=+systray,+waylanddrv`에서 `position unknown, probing on N outputs` → `wayland_surface_catcher_enter ... tray menu at (x,y) in output ...`.
+바 없이 재현: `busctl --user call org.kde.StatusNotifierItem-<pid>-1 /StatusNotifierItem org.kde.StatusNotifierItem ContextMenu ii 0 0`.
 
 ---
 

@@ -1,0 +1,468 @@
+diff --git a/dlls/winewayland.drv/wayland_pointer.c b/dlls/winewayland.drv/wayland_pointer.c
+index 8812cd5..35c069a 100644
+--- a/dlls/winewayland.drv/wayland_pointer.c
++++ b/dlls/winewayland.drv/wayland_pointer.c
+@@ -128,7 +128,7 @@ static BOOL wayland_pointer_on_catcher(void)
+     BOOL ret;
+ 
+     pthread_mutex_lock(&pointer->mutex);
+-    ret = pointer->focused_catcher;
++    ret = pointer->focused_catcher != NULL;
+     pthread_mutex_unlock(&pointer->mutex);
+ 
+     return ret;
+@@ -232,10 +232,15 @@ static void pointer_handle_enter(void *data, struct wl_pointer *wl_pointer,
+ 
+     pthread_mutex_lock(&pointer->mutex);
+     pointer->focused_hwnd = hwnd;
+-    pointer->focused_catcher = wayland_surface_is_catcher(wl_surface);
++    pointer->focused_catcher = wayland_surface_is_catcher(wl_surface) ? wl_surface : NULL;
+     pointer->enter_serial = serial;
+     pthread_mutex_unlock(&pointer->mutex);
+ 
++    /* a tray menu whose position the bar didn't tell us opens where the
++     * pointer is (still over the clicked tray icon) */
++    if (wayland_surface_is_catcher(wl_surface))
++        wayland_surface_catcher_enter(hwnd, wl_surface, wl_fixed_to_double(sx), wl_fixed_to_double(sy));
++
+     /* The cursor is undefined at every enter, so we set it again with
+      * the latest information we have. */
+     wayland_set_cursor(hwnd, NULL, FALSE);
+@@ -259,7 +264,7 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
+ 
+     pthread_mutex_lock(&pointer->mutex);
+     pointer->focused_hwnd = NULL;
+-    pointer->focused_catcher = FALSE;
++    pointer->focused_catcher = NULL;
+     pointer->enter_serial = 0;
+     pthread_mutex_unlock(&pointer->mutex);
+ }
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index f3fec13..e90be0a 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -205,32 +205,59 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener =
+ 
+ static const char *catcher_tag = "winewayland-tray-catcher";
+ 
++/* Transparent surface below a tray menu, catching the clicks outside of it.
++ * One per output while probing for the menu position, else one. */
++struct wayland_catcher
++{
++    struct wl_list link;
++    struct wl_surface *wl_surface;
++    struct zwlr_layer_surface_v1 *layer_surface;
++    struct wp_viewport *viewport;
++    struct wayland_shm_buffer *buffer;
++    struct wl_output *wl_output;
++    RECT output_rect;      /* logical rect of its output */
++};
++
+ BOOL wayland_surface_is_catcher(struct wl_surface *wl_surface)
+ {
+     return wl_proxy_get_tag((struct wl_proxy *)wl_surface) == &catcher_tag;
+ }
+ 
++static struct wayland_catcher *find_catcher(struct wayland_surface *surface,
++                                            struct zwlr_layer_surface_v1 *layer_surface,
++                                            struct wl_surface *wl_surface)
++{
++    struct wayland_catcher *catcher;
++
++    if (!surface || surface->role != WAYLAND_SURFACE_ROLE_LAYER) return NULL;
++    wl_list_for_each(catcher, &surface->catchers, link)
++    {
++        if (layer_surface && catcher->layer_surface == layer_surface) return catcher;
++        if (wl_surface && catcher->wl_surface == wl_surface) return catcher;
++    }
++    return NULL;
++}
++
+ static void catcher_handle_configure(void *private, struct zwlr_layer_surface_v1 *layer_surface,
+                                      uint32_t serial, uint32_t width, uint32_t height)
+ {
+-    struct wayland_surface *surface;
++    struct wayland_catcher *catcher;
+     struct wayland_win_data *data;
+     HWND hwnd = private;
+ 
+     TRACE("hwnd=%p serial=%u %ux%u\n", hwnd, serial, width, height);
+ 
+     if (!(data = wayland_win_data_get(hwnd))) return;
+-    if ((surface = data->wayland_surface) && surface->role == WAYLAND_SURFACE_ROLE_LAYER &&
+-        surface->catcher_layer == layer_surface)
++    if ((catcher = find_catcher(data->wayland_surface, layer_surface, NULL)))
+     {
+         zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
+         if (width && height)
+         {
+-            wp_viewport_set_destination(surface->catcher_viewport, width, height);
+-            wl_surface_attach(surface->catcher_surface, surface->catcher_buffer->wl_buffer, 0, 0);
+-            wl_surface_damage_buffer(surface->catcher_surface, 0, 0, 1, 1);
++            wp_viewport_set_destination(catcher->viewport, width, height);
++            wl_surface_attach(catcher->wl_surface, catcher->buffer->wl_buffer, 0, 0);
++            wl_surface_damage_buffer(catcher->wl_surface, 0, 0, 1, 1);
+         }
+-        wl_surface_commit(surface->catcher_surface);
++        wl_surface_commit(catcher->wl_surface);
+         wl_display_flush(process_wayland.wl_display);
+     }
+     wayland_win_data_release(data);
+@@ -242,65 +269,94 @@ static const struct zwlr_layer_surface_v1_listener catcher_listener =
+     layer_surface_handle_closed,
+ };
+ 
+-static void destroy_catcher(struct wayland_surface *surface)
++static void destroy_catcher(struct wayland_surface *surface, struct wayland_catcher *catcher)
+ {
+     struct wayland_pointer *pointer = &process_wayland.pointer;
+ 
++    /* the compositor won't send a leave for a destroyed surface */
+     pthread_mutex_lock(&pointer->mutex);
+-    if (pointer->focused_catcher && pointer->focused_hwnd == surface->hwnd)
++    if (pointer->focused_catcher == catcher->wl_surface && pointer->focused_hwnd == surface->hwnd)
+     {
+         pointer->focused_hwnd = NULL;
+-        pointer->focused_catcher = FALSE;
++        pointer->focused_catcher = NULL;
+         pointer->enter_serial = 0;
+     }
+     pthread_mutex_unlock(&pointer->mutex);
+ 
+-    if (surface->catcher_layer) zwlr_layer_surface_v1_destroy(surface->catcher_layer);
+-    if (surface->catcher_viewport) wp_viewport_destroy(surface->catcher_viewport);
+-    if (surface->catcher_surface) wl_surface_destroy(surface->catcher_surface);
+-    if (surface->catcher_buffer) wayland_shm_buffer_unref(surface->catcher_buffer);
+-    surface->catcher_layer = NULL;
+-    surface->catcher_viewport = NULL;
+-    surface->catcher_surface = NULL;
+-    surface->catcher_buffer = NULL;
++    if (catcher->layer_surface) zwlr_layer_surface_v1_destroy(catcher->layer_surface);
++    if (catcher->viewport) wp_viewport_destroy(catcher->viewport);
++    if (catcher->wl_surface) wl_surface_destroy(catcher->wl_surface);
++    if (catcher->buffer) wayland_shm_buffer_unref(catcher->buffer);
++    wl_list_remove(&catcher->link);
++    free(catcher);
++}
++
++static void destroy_catchers(struct wayland_surface *surface)
++{
++    struct wayland_catcher *catcher, *next;
++
++    wl_list_for_each_safe(catcher, next, &surface->catchers, link)
++        destroy_catcher(surface, catcher);
++}
++
++/* A probing catcher covers the whole output, bars included, on the overlay
++ * layer, so that the pointer (still over the clicked tray icon) enters it.
++ * A plain one leaves the bars alone and stays below the menu. */
++static void catcher_set_probe(struct wayland_catcher *catcher, BOOL probe)
++{
++    if (zwlr_layer_surface_v1_get_version(catcher->layer_surface) >=
++        ZWLR_LAYER_SURFACE_V1_SET_LAYER_SINCE_VERSION)
++        zwlr_layer_surface_v1_set_layer(catcher->layer_surface,
++                                        probe ? ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY
++                                              : ZWLR_LAYER_SHELL_V1_LAYER_TOP);
++    zwlr_layer_surface_v1_set_exclusive_zone(catcher->layer_surface, probe ? -1 : 0);
+ }
+ 
+ /* Clicks outside of a tray menu never reach us on Wayland, so cover the
+  * output (except the bars) with a transparent surface below the menu. Its
+  * clicks are sent to the menu as clicks outside of it, which closes it. */
+-static void create_catcher(struct wayland_surface *surface, struct wl_output *wl_output)
++static BOOL create_catcher(struct wayland_surface *surface, struct wl_output *wl_output,
++                           const RECT *output_rect, BOOL probe)
+ {
+-    if (!process_wayland.wp_viewporter) return;
++    struct wayland_catcher *catcher;
+ 
+-    if (!(surface->catcher_buffer = wayland_shm_buffer_create(1, 1, WL_SHM_FORMAT_ARGB8888)) ||
+-        !(surface->catcher_surface = wl_compositor_create_surface(process_wayland.wl_compositor)))
++    if (!process_wayland.wp_viewporter) return FALSE;
++    if (!(catcher = calloc(1, sizeof(*catcher)))) return FALSE;
++    wl_list_insert(&surface->catchers, &catcher->link);
++    catcher->wl_output = wl_output;
++    catcher->output_rect = *output_rect;
++
++    if (!(catcher->buffer = wayland_shm_buffer_create(1, 1, WL_SHM_FORMAT_ARGB8888)) ||
++        !(catcher->wl_surface = wl_compositor_create_surface(process_wayland.wl_compositor)))
+         goto failed;
+-    wl_surface_set_user_data(surface->catcher_surface, surface->hwnd);
+-    wl_proxy_set_tag((struct wl_proxy *)surface->catcher_surface, &catcher_tag);
+-    memset(surface->catcher_buffer->map_data, 0, surface->catcher_buffer->map_size);
++    wl_surface_set_user_data(catcher->wl_surface, surface->hwnd);
++    wl_proxy_set_tag((struct wl_proxy *)catcher->wl_surface, &catcher_tag);
++    memset(catcher->buffer->map_data, 0, catcher->buffer->map_size);
+ 
+-    if (!(surface->catcher_viewport = wp_viewporter_get_viewport(process_wayland.wp_viewporter,
+-                                                                 surface->catcher_surface)))
++    if (!(catcher->viewport = wp_viewporter_get_viewport(process_wayland.wp_viewporter,
++                                                         catcher->wl_surface)))
+         goto failed;
+     /* the top layer is below the menu (overlay) but above the windows */
+-    if (!(surface->catcher_layer =
++    if (!(catcher->layer_surface =
+           zwlr_layer_shell_v1_get_layer_surface(process_wayland.zwlr_layer_shell_v1,
+-                                                surface->catcher_surface, wl_output,
+-                                                ZWLR_LAYER_SHELL_V1_LAYER_TOP,
++                                                catcher->wl_surface, wl_output,
++                                                probe ? ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY
++                                                      : ZWLR_LAYER_SHELL_V1_LAYER_TOP,
+                                                 "wine-tray-menu-catcher")))
+         goto failed;
+-    zwlr_layer_surface_v1_add_listener(surface->catcher_layer, &catcher_listener, surface->hwnd);
+-    zwlr_layer_surface_v1_set_anchor(surface->catcher_layer,
++    zwlr_layer_surface_v1_add_listener(catcher->layer_surface, &catcher_listener, surface->hwnd);
++    zwlr_layer_surface_v1_set_anchor(catcher->layer_surface,
+                                      ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+                                      ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+-    zwlr_layer_surface_v1_set_size(surface->catcher_layer, 0, 0);
+-    zwlr_layer_surface_v1_set_exclusive_zone(surface->catcher_layer, 0);
+-    wl_surface_commit(surface->catcher_surface);
+-    return;
++    zwlr_layer_surface_v1_set_size(catcher->layer_surface, 0, 0);
++    catcher_set_probe(catcher, probe);
++    wl_surface_commit(catcher->wl_surface);
++    return TRUE;
+ 
+ failed:
+     ERR("failed to create the tray menu click catcher\n");
+-    destroy_catcher(surface);
++    destroy_catcher(surface, catcher);
++    return FALSE;
+ }
+ 
+ static void xdg_toplevel_handle_configure(void *private,
+@@ -643,17 +699,58 @@ err:
+  * must appear next to the bar on Wayland where clients can't position
+  * their toplevels.
+  */
++/* Creates the menu's layer surface on the output, to open at pos (output-local). */
++static void layer_surface_create(struct wayland_surface *surface, struct wl_output *wl_output,
++                                 const RECT *output_rect, POINT pos)
++{
++    TRACE("surface=%p pos=%s output=%s\n", surface, wine_dbgstr_point(&pos),
++          wine_dbgstr_rect(output_rect));
++
++    surface->layer_surface =
++        zwlr_layer_shell_v1_get_layer_surface(process_wayland.zwlr_layer_shell_v1,
++                                              surface->wl_surface, wl_output,
++                                              ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
++                                              "wine-tray-menu");
++    if (!surface->layer_surface)
++    {
++        wayland_surface_clear_role(surface);
++        ERR("Failed to assign layer surface role to wayland surface\n");
++        return;
++    }
++    zwlr_layer_surface_v1_add_listener(surface->layer_surface, &layer_surface_listener,
++                                       surface->hwnd);
++    if (zwlr_layer_surface_v1_get_version(surface->layer_surface) >=
++        ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND_SINCE_VERSION)
++        zwlr_layer_surface_v1_set_keyboard_interactivity(
++            surface->layer_surface, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND);
++    /* avoid the bar's exclusive zone, i.e. open just below/above it */
++    zwlr_layer_surface_v1_set_exclusive_zone(surface->layer_surface, 0);
++
++    surface->layer_pos = pos;
++    surface->layer_output = *output_rect;
++    surface->layer_width = surface->layer_height = 0;
++    surface->layer_committed = FALSE;
++    /* the initial commit needs a size, done in wayland_surface_reconfigure_layer */
++}
++
+ void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
+ {
+     struct wayland_output *output;
+     struct wl_output *wl_output = NULL;
+     RECT output_rect = {0};
++    /* Some bars (wayle) always report the click at 0,0. Then find the
++     * position with probing catchers instead: see wayland_surface_catcher_enter. */
++    BOOL probe = !pos.x && !pos.y;
+ 
+     assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_LAYER);
+-    if (surface->layer_surface) return;
++    if (surface->role == WAYLAND_SURFACE_ROLE_LAYER &&
++        (surface->layer_surface || surface->layer_pending)) return;
+ 
+     wayland_surface_clear_role(surface);
+     surface->role = WAYLAND_SURFACE_ROLE_LAYER;
++    surface->layer_surface = NULL;
++    surface->layer_pending = FALSE;
++    wl_list_init(&surface->catchers);
+ 
+     pthread_mutex_lock(&process_wayland.output_mutex);
+     wl_list_for_each(output, &process_wayland.output_list, link)
+@@ -664,6 +761,11 @@ void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
+         SetRect(&rect, output->current.logical_x, output->current.logical_y,
+                 output->current.logical_x + output->current.logical_w,
+                 output->current.logical_y + output->current.logical_h);
++        if (probe)
++        {
++            create_catcher(surface, output->wl_output, &rect, TRUE);
++            continue;
++        }
+         inside = pos.x >= rect.left && pos.x < rect.right && pos.y >= rect.top && pos.y < rect.bottom;
+         /* the output that was clicked, or else the first one */
+         if (!wl_output || inside)
+@@ -675,39 +777,58 @@ void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
+     }
+     pthread_mutex_unlock(&process_wayland.output_mutex);
+ 
+-    TRACE("surface=%p pos=%s output=%s\n", surface, wine_dbgstr_point(&pos),
+-          wine_dbgstr_rect(&output_rect));
++    wayland_surface_init_fractional_scale(surface, 1.0);
+ 
+-    surface->layer_surface =
+-        zwlr_layer_shell_v1_get_layer_surface(process_wayland.zwlr_layer_shell_v1,
+-                                              surface->wl_surface, wl_output,
+-                                              ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+-                                              "wine-tray-menu");
+-    if (!surface->layer_surface)
++    if (probe && !wl_list_empty(&surface->catchers))
+     {
+-        wayland_surface_clear_role(surface);
+-        ERR("Failed to assign layer surface role to wayland surface\n");
++        TRACE("surface=%p position unknown, probing on %d outputs\n", surface,
++              wl_list_length(&surface->catchers));
++        surface->layer_pending = TRUE;
+         return;
+     }
+-    zwlr_layer_surface_v1_add_listener(surface->layer_surface, &layer_surface_listener,
+-                                       surface->hwnd);
+-    if (zwlr_layer_surface_v1_get_version(surface->layer_surface) >=
+-        ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND_SINCE_VERSION)
+-        zwlr_layer_surface_v1_set_keyboard_interactivity(
+-            surface->layer_surface, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_ON_DEMAND);
+-    /* avoid the bar's exclusive zone, i.e. open just below/above it */
+-    zwlr_layer_surface_v1_set_exclusive_zone(surface->layer_surface, 0);
++    if (probe) WARN("surface=%p cannot probe for the tray menu position\n", surface);
+ 
+-    create_catcher(surface, wl_output);
++    layer_surface_create(surface, wl_output, &output_rect, pos);
++    if (!surface->layer_surface) return;
++    pos.x -= output_rect.left;
++    pos.y -= output_rect.top;
++    surface->layer_pos = pos;
++    create_catcher(surface, wl_output, &output_rect, FALSE);
++}
+ 
+-    surface->layer_pos.x = pos.x - output_rect.left;
+-    surface->layer_pos.y = pos.y - output_rect.top;
+-    surface->layer_output = output_rect;
+-    surface->layer_width = surface->layer_height = 0;
+-    surface->layer_committed = FALSE;
++/**********************************************************************
++ *          wayland_surface_catcher_enter
++ *
++ * The pointer entered a tray menu click catcher. If the menu is waiting for
++ * its position (the bar didn't tell us where the tray was clicked), that is
++ * where the pointer is now: open the menu there and drop the other probes.
++ */
++void wayland_surface_catcher_enter(HWND hwnd, struct wl_surface *wl_surface, double x, double y)
++{
++    struct wayland_catcher *catcher, *other, *next;
++    struct wayland_win_data *data;
++    struct wayland_surface *surface;
++    POINT pos = { x, y };
+ 
+-    wayland_surface_init_fractional_scale(surface, 1.0);
+-    /* the initial commit needs a size, done in wayland_surface_reconfigure_layer */
++    if (!(data = wayland_win_data_get(hwnd))) return;
++    if ((surface = data->wayland_surface) && surface->layer_pending &&
++        (catcher = find_catcher(surface, NULL, wl_surface)))
++    {
++        TRACE("hwnd=%p tray menu at %s in output %s\n", hwnd, wine_dbgstr_point(&pos),
++              wine_dbgstr_rect(&catcher->output_rect));
++
++        wl_list_for_each_safe(other, next, &surface->catchers, link)
++            if (other != catcher) destroy_catcher(surface, other);
++        catcher_set_probe(catcher, FALSE);
++        wl_surface_commit(catcher->wl_surface);
++
++        surface->layer_pending = FALSE;
++        layer_surface_create(surface, catcher->wl_output, &catcher->output_rect, pos);
++        /* the window is already shown: do the initial commit now */
++        if (surface->layer_surface) wayland_surface_reconfigure(surface);
++        wl_display_flush(process_wayland.wl_display);
++    }
++    wayland_win_data_release(data);
+ }
+ 
+ /**********************************************************************
+@@ -768,12 +889,13 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
+         break;
+ 
+     case WAYLAND_SURFACE_ROLE_LAYER:
+-        destroy_catcher(surface);
++        destroy_catchers(surface);
+         if (surface->layer_surface)
+         {
+             zwlr_layer_surface_v1_destroy(surface->layer_surface);
+             surface->layer_surface = NULL;
+         }
++        surface->layer_pending = FALSE;
+         surface->layer_committed = FALSE;
+         break;
+     }
+@@ -1174,6 +1296,7 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
+         wayland_surface_reconfigure_subsurface(surface);
+         break;
+     case WAYLAND_SURFACE_ROLE_LAYER:
++        if (surface->layer_pending) return FALSE; /* no layer surface until we know where to open */
+         if (!surface->layer_surface) break; /* surface role has been cleared */
+         if (!wayland_surface_reconfigure_layer(surface, rect)) return FALSE;
+         break;
+diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
+index c803e30..d8dd276 100644
+--- a/dlls/winewayland.drv/waylanddrv.h
++++ b/dlls/winewayland.drv/waylanddrv.h
+@@ -115,7 +115,7 @@ struct wayland_pointer
+     struct zwp_relative_pointer_v1 *zwp_relative_pointer_v1;
+     struct wp_cursor_shape_device_v1 *wp_cursor_shape_device_v1;
+     HWND focused_hwnd;
+-    BOOL focused_catcher; /* focused_hwnd's tray menu click catcher */
++    struct wl_surface *focused_catcher; /* focused_hwnd's tray menu click catcher, if on one */
+     HWND constraint_hwnd;
+     BOOL relative_mode;
+     BOOL pending_warp;
+@@ -307,15 +307,13 @@ struct wayland_surface
+         struct
+         {
+             struct zwlr_layer_surface_v1 *layer_surface;
++            BOOL layer_pending;    /* position unknown: waiting for the pointer to enter a catcher */
+             POINT layer_pos;       /* requested position, output-local logical coords */
+             RECT layer_output;     /* logical rect of the output */
+             int layer_width, layer_height;
+             BOOL layer_committed;  /* initial commit done */
+-            /* transparent surface below the menu, catching clicks outside of it */
+-            struct wl_surface *catcher_surface;
+-            struct zwlr_layer_surface_v1 *catcher_layer;
+-            struct wp_viewport *catcher_viewport;
+-            struct wayland_shm_buffer *catcher_buffer;
++            /* transparent surfaces below the menu, catching clicks outside of it */
++            struct wl_list catchers;
+         };
+     };
+     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
+@@ -355,6 +353,7 @@ struct wayland_surface *wayland_surface_create(HWND hwnd);
+ void wayland_surface_destroy(struct wayland_surface *surface);
+ void wayland_surface_make_toplevel(struct wayland_surface *surface);
+ void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos);
++void wayland_surface_catcher_enter(HWND hwnd, struct wl_surface *wl_surface, double x, double y);
+ BOOL wayland_surface_is_catcher(struct wl_surface *wl_surface);
+ void wayland_surface_make_subsurface(struct wayland_surface *surface,
+                                      struct wayland_surface *parent);
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 68f9cf7..8e51a14 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -190,7 +190,7 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
+     /* the first popup shown right after a tray icon click (the tray menu) is
+      * placed where the tray was clicked, as a layer surface */
+     else if (data->wayland_surface && data->wayland_surface->role == WAYLAND_SURFACE_ROLE_LAYER &&
+-             data->wayland_surface->layer_surface)
++             (data->wayland_surface->layer_surface || data->wayland_surface->layer_pending))
+         role = WAYLAND_SURFACE_ROLE_LAYER;
+     else if (!data->managed && process_wayland.zwlr_layer_shell_v1 &&
+              (NtUserGetWindowLongW(data->hwnd, GWL_STYLE) & WS_POPUP) &&
