@@ -1,0 +1,18 @@
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 4f0610c..101e33c 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -3255,6 +3255,13 @@ static BOOL set_window_placement( HWND hwnd, const WINDOWPLACEMENT *wndpl, UINT
+     WINDOWPLACEMENT wp = *wndpl;
+     DWORD style;
+ 
++    /* (-1,-1) is what GetWindowPlacement returns for a position that was
++     * never set; passing it back (as Qt does on every maximize) must not
++     * move the window, else a maximized window gets moved to 0,0 and its
++     * frame no longer hangs over the work area edges. */
++    if ((flags & PLACE_MIN) && empty_point( wp.ptMinPosition )) flags &= ~PLACE_MIN;
++    if ((flags & PLACE_MAX) && empty_point( wp.ptMaxPosition )) flags &= ~PLACE_MAX;
++
+     if (flags & PLACE_MIN) make_point_onscreen( &wp.ptMinPosition );
+     if (flags & PLACE_MAX) make_point_onscreen( &wp.ptMaxPosition );
+     if (flags & PLACE_RECT) make_rect_onscreen( &wp.rcNormalPosition );

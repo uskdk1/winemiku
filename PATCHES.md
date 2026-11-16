@@ -14,6 +14,8 @@
 | [0005](#0005-wintrust-builtin-signature) | wintrust | 내장 DLL에 가짜 "Microsoft Windows" 서명 |
 | [0006](#0006-gdi32-setbkmode-invalid) | gdi32 | `SetBkMode`에 이상한 값을 주면 투명으로 |
 | [0007](#0007-winewayland-systray-menu-probe) | winewayland.drv | 바가 클릭 좌표를 안 주면(wayle) 트레이 메뉴를 포인터 위치에 |
+| [0008](#0008-win32u-placement-unset-pos) | win32u | `SetWindowPlacement`의 (-1,-1) 위치는 "지정 안 함" |
+| [0009](#0009-winewayland-maximize-work-area) | winewayland.drv | 작업 영역(바 제외)을 알아내고, 최대화·복원을 Windows처럼 |
 | [dxvk 0001](#dxvk-0001-d3d11-auto-generate-mips) | DXVK d3d11 | 큰 이미지를 작게 그릴 때 숨은 mipmap |
 
 ---
@@ -126,6 +128,45 @@ Wayland에서 전역 포인터 위치는 알 수 없지만, 클릭 직후 포인
 
 **확인**: `WINEDEBUG=+systray,+waylanddrv`에서 `position unknown, probing on N outputs` → `wayland_surface_catcher_enter ... tray menu at (x,y) in output ...`.
 바 없이 재현: `busctl --user call org.kde.StatusNotifierItem-<pid>-1 /StatusNotifierItem org.kde.StatusNotifierItem ContextMenu ii 0 0`.
+
+---
+
+## 0008 win32u-placement-unset-pos
+
+**문제**: 카카오톡을 최대화하면 창이 (0,0)으로 옮겨져 오른쪽·아래로 모니터 밖으로 삐져나간다 (0009의 증상 중 하나).
+
+**원인**: Qt는 최대화될 때마다 `GetWindowPlacement`로 받은 값을 `SetWindowPlacement`로 되돌려 준다. 그 안의 `ptMaxPosition`은 (-1,-1), 즉
+"지정 안 함"인데, Wine은 이를 화면 안으로 보정해 (0,0)으로 만들고 **최대화된 창을 거기로 옮긴다**. Windows는 (-1,-1)을 무시한다.
+
+**수정** (`dlls/win32u/window.c`, `set_window_placement`): `ptMinPosition`·`ptMaxPosition`이 (-1,-1)이면 그 부분을 적용하지 않는다.
+
+---
+
+## 0009 winewayland-maximize-work-area
+
+**문제**: 카카오톡을 최대화하면 엉망이 된다. 창이 CPU를 먹으며 떨고(configure 반복), 1초쯤 뒤 스스로 최대화가 풀리는데
+크기는 화면 전체라 최대화 버튼을 두 번 눌러야 "복원"이 뜨고, 그 상태에서 창 안에 들어가면 마우스가 못 빠져나오고(커서 가두기),
+최대화 창을 끌어서 떼도 같은 상태가 된다.
+
+**원인**: Wine은 Wayland에서 **작업 영역**(바를 뺀 영역)을 몰라 작업 영역 = 모니터 전체로 보고한다. Windows에서 최대화 창의 클라이언트
+영역은 작업 영역이고 Qt(프레임 없는 창)는 `WM_NCCALCSIZE`에서 그 크기를 고집하는데, 컴포지터(niri)는 바를 뺀 1920×1045를 준다.
+Wine은 창을 컴포지터 크기로 줄이고, 앱은 다시 작업 영역 크기로 되돌리고, 그 사이에 `set_min_size/max_size`가 (0,0)과 창 크기 사이를
+오가며 niri가 매번 configure를 보내 루프가 된다. 그러다 컴포지터가 최대화를 풀면 Wine은 `WS_MAXIMIZE` 비트만 지우고 크기는 그대로 둬서
+"화면 크기의 일반 창"이 되고, win32u는 모니터를 덮는 창을 전체화면 앱으로 보고 커서를 가두고 크기를 고정한다.
+
+**수정**
+- **작업 영역 probe** (`wayland_output.c`): explorer(디스플레이 장치를 등록하는 프로세스)가 출력마다 보이지 않는 layer 표면(background 레이어,
+  투명, 입력 없음, 네 변에 앵커, exclusive zone 0)을 둔다. 컴포지터가 주는 그 크기가 곧 바를 뺀 작업 영역이다. 바뀌면(바가 켜지거나 꺼지면)
+  디스플레이 장치를 다시 등록한다. `display.c`가 `rcWork`로 보고한다. 위치는 알 수 없어 바가 **위·왼쪽**에 있다고 보고, 트레이를 아래쪽에서
+  클릭한 적이 있으면 아래로 본다.
+  그러면 Win32 최대화 창의 클라이언트 = 작업 영역 = 컴포지터의 최대화 크기라 아무것도 다툴 게 없다. 알림 토스트 같은 작업 영역 기준 위치도 맞는다.
+- `wayland_configure_window` (`window.c`): 최대화 configure 때 클라이언트 크기가 이미 같으면 크기를 바꾸지 않는다.
+  컴포지터가 최대화를 풀었는데(끌어서 뗌) 크기를 안 주면 `WS_MAXIMIZE`만 지우지 않고 `SC_RESTORE`로 제대로 복원한다 (최소화 복원과 같은 경로).
+- `WAYLAND_WindowPosChanged`: 굵은 테두리(`WS_THICKFRAME`) 창은 모니터를 덮어도 크기 조절 가능으로 둔다 (min/max 고정 안 함).
+- `wayland_win_data_get_config`: 제목줄·굵은 테두리가 있는 창이 모니터 크기여도 xdg 전체화면으로 보내지 않는다 (일반 창으로 두어 옮기고 줄일 수 있게).
+
+**확인**: `WINEDEBUG=+waylanddrv`에서 `work_probe_handle_configure output=... work area WxH`, `wayland_add_device_monitor ... rc_work=(0,35)-(1920,1080)`.
+`niri msg windows`의 창 크기와 `GetClientRect`가 같아야 한다. 끄기: 없음 (layer-shell이 없는 컴포지터에서는 전처럼 작업 영역 = 모니터).
 
 ---
 
