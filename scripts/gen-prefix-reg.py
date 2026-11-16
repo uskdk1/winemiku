@@ -5,8 +5,8 @@
   Malgun Gothic 으로 대체, Tahoma -> DejaVu Sans, Arial -> Arimo + FontLink
 - 트레이: explorer 의 대체 트레이 창 끄기 (patches/0004 가 바로 보낸다)
 
-Wayland 드라이버(Graphics), DXVK DllOverrides, winemenubuilder 옵션은 wiku 토글이 한다
-(flake.nix defaults: wayland, dxvk. fileAssoc 는 wiku 기본값 끔). wiku 는 이 파일 다음에 자기 것을 적용한다.
+Wayland 드라이버(Graphics), DXVK DllOverrides 는 wiku 토글이 하고 (flake.nix defaults: wayland, dxvk),
+winemenubuilder 는 wiku 가 끈다 (앱 메뉴는 wiku 가 prefix 별로 만든다). wiku 는 이 파일 다음에 자기 것을 적용한다.
 
 사용법: gen-prefix-reg.py <출력.reg>
 """

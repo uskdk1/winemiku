@@ -100,17 +100,18 @@ bin/winemiku --kill                                      # 이 prefix의 Wine �
 bin/winemiku --kill-all                                  # 이 저장소 Wine으로 뜬 모든 prefix
 ```
 
-앱 메뉴 바로가기(`~/.local/share/applications/wine/…`)도 `bin/winemiku`를 부른다
-(patches/0002: `WINEMENUBUILDER_LAUNCHER`). vanilla wine과 wiku 패키지(데이터 포함)는 `.gcroots/`로 GC에서 보호된다.
+앱 메뉴 바로가기는 wiku가 prefix별로 만든다(`~/.local/share/applications/wiku/miku/`, 이름은 `카카오톡 (miku)`).
+Wine의 winemenubuilder는 꺼 두고, 실행이 끝나면 prefix의 시작 메뉴 `.lnk`로 만들며 `bin/winemiku`를 부른다.
+vanilla wine과 wiku 패키지(데이터 포함)는 `.gcroots/`로 GC에서 보호된다.
 
 ### prefix 초기화
 
 - `rm -rf prefix/drive_c` 해도 된다. 다음 실행 때 prefix 전체(레지스트리 포함)를 새로 만든다.
 - 새 prefix는 `.cache/templates/<key>`(깨끗한 prefix + 한글/Wayland 설정)에서 btrfs reflink로 복사해서 거의 즉시 생긴다.
   템플릿은 Wine 버전·설정이 바뀌면 자동으로 다시 만든다(그때만 ~20초).
-- 초기화할 때 이 prefix를 가리키는 앱 메뉴 항목(`.desktop`, `.menu`)도 지운다. 다른 prefix 것은 건드리지 않는다.
+- 초기화할 때 이 prefix의 앱 메뉴(`applications/wiku/miku/`, 예전에 Wine이 만든 항목 포함)도 지운다. 다른 prefix 것은 건드리지 않는다.
 - 안전장치: wiku(또는 예전 winemiku)가 만든 prefix(`.wiku-prefix`/`.wm-prefix` 표시)만 지운다.
-- Wine 기본 파일 연결(`wine-extension-*.desktop`)은 만들지 않는다 (wiku `fileAssoc` 기본값 끔). 이 파일들은 이름이 prefix끼리 공유돼서 서로 덮어쓴다.
+- Wine 파일 연결(이 prefix의 앱으로 파일 열기)은 만들지 않는다 (wiku `fileAssoc` 기본값 끔). 켜면 앱 메뉴와 같은 디렉터리에 만든다.
 
 ### 실행 환경 (wm-run)
 

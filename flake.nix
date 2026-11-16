@@ -52,7 +52,7 @@
       '';
 
       # prefix 레지스트리 (폰트 등록·대체·FontLink, 트레이 창 끄기). scripts/gen-prefix-reg.py
-      # (Wayland 드라이버, DXVK override, winemenubuilder 옵션은 wiku 토글이 한다)
+      # (Wayland 드라이버, DXVK override 는 wiku 토글이, winemenubuilder 끄기·앱 메뉴는 wiku 가 한다)
       winemiku-reg = pkgs.runCommand "winemiku-reg" { nativeBuildInputs = [ pkgs.python3 ]; } ''
         mkdir -p $out
         python3 -I ${./scripts/gen-prefix-reg.py} $out/prefix.reg
