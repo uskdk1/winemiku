@@ -1,6 +1,7 @@
 # 패치 설명
 
 `patches/*.patch`는 Wine(wine-staging), `patches/dxvk/*.patch`는 DXVK에 얹는다. 이름순으로 적용한다.
+(0002는 winemenubuilder의 `Exec=`를 바꾸는 패치였는데, wiku가 메뉴를 직접 만들면서 필요 없어져 지웠다. 번호는 그대로 둔다.)
 마지막 절은 패치가 아니라 prefix에 넣는 레지스트리·폰트 설명이다.
 
 각 패치마다 **문제**, **원인**, **수정**, **확인·끄기** 순서로 적는다. 로그는 `WINEDEBUG=<채널> wm-run app.exe`.
@@ -8,7 +9,6 @@
 | 패치 | 모듈 | 한 줄 |
 |---|---|---|
 | [0001](#0001-uac-normal-user) | ntdll, shell32, server | 일반 실행을 앱에 "관리자 아님"으로 보고 |
-| [0002](#0002-menubuilder-launcher) | winemenubuilder | 바로가기 `Exec=`에 `wine` 대신 지정한 실행기 |
 | [0003](#0003-winewayland-noactivate-popup) | winewayland.drv | 메뉴·툴팁 팝업이 포커스를 뺏지 않게 |
 | [0004](#0004-winewayland-systray-sni) | winewayland.drv | 트레이 아이콘을 StatusNotifierItem(D-Bus)으로 |
 | [0005](#0005-wintrust-builtin-signature) | wintrust | 내장 DLL에 가짜 "Microsoft Windows" 서명 |
@@ -31,18 +31,6 @@ Windows의 UAC는 일반 실행 토큰에서 Administrators를 deny-only로 바�
 - `dlls/shell32/shellord.c`: `IsUserAnAdmin`이 deny-only·비활성 그룹을 세지 않게 (Windows와 같게).
 
 관리자로 띄운 것(`runas`, `requireAdministrator` 매니페스트)은 전처럼 Full 토큰이라 관리자다.
-
----
-
-## 0002 menubuilder-launcher
-
-**문제**: winemenubuilder가 만드는 `.desktop`의 `Exec=`가 `wine "..."`로 고정돼 있다. 우리 Wine은 PATH에 없고, 실행기를 거쳐야 환경이 맞는다.
-
-**수정**: 환경 변수 `WINEMENUBUILDER_LAUNCHER`가 있으면 `Exec=env "WINEPREFIX=..." "<그 값>" "..."`로 쓴다.
-앱 바로가기와 파일 연결(`wine start /ProgIDOpen`) 둘 다.
-
-**지금 상태**: wiku는 winemenubuilder를 꺼 두고 메뉴를 직접 만들며, 그때 `Exec=`를 자기가 고쳐 쓴다.
-그래서 이 패치는 현재 쓰이지 않는다. winemenubuilder를 켜고 쓰는 변형을 위해 남겨 뒀고, 필요 없으면 지워도 된다.
 
 ---
 
