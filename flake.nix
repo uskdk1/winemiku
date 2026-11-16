@@ -1,4 +1,5 @@
 {
+  # 단독으로 배포하지 않는다: wiku 의 변형(programs.wiku.wines)으로 쓰고, 이 저장소에서는 개발만 한다
   description = "winemiku - 커스텀 패치를 얹은 Wine (Wayland, 한국어, DXVK). wiku 변형";
 
   # 빌드된 패치 모듈·DXVK 를 받는 바이너리 캐시 (없으면 직접 빌드: 모듈 약 4분 + DXVK 약 10분)
@@ -22,7 +23,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
       lib = nixpkgs.lib;
 
-      # nixpkgs 캐시에 있는 빌드된 wine (개발 중 실행용, 컴파일 없음)
+      # 바탕 wine: nixpkgs 캐시에 있는 빌드된 wine-staging (컴파일 없음)
       wine-vanilla = pkgs.wineWow64Packages.stagingFull;
 
       # 한글 폰트 (static 버전: Wine 은 가변 폰트 처리가 불완전)
@@ -97,16 +98,13 @@
         wine-miku-modules = winemiku.modules;
       };
 
-      apps.${system}.default = {
-        type = "app";
-        program = "${winemiku}/bin/wiku";
-      };
-
       # 개발 셸: wine 빌드 의존성 전부 + 실행용 vanilla wine + 헬퍼 함수
       devShells.${system}.default = winemiku.wine-full.overrideAttrs (o: {
         nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ pkgs.git ];
-        WINE_VANILLA = wine-vanilla;
-        # wm-run 은 wiku 실행기를 개발용 설정(runtime/, override/, ./prefix)으로 부른다
+        # runtime/ 의 바탕: vanilla wine + 패치된 모듈 (캐시에서 받음). 그 위에 override/ (wm-build)
+        WM_WIKU_RUNTIME = winemiku.runtime;
+        # prefix 준비·실행 환경은 wiku 가 개발용 설정(runtime/, override/, ./prefix)으로 맞추고 (--env),
+        # wm-run 은 runtime/bin/wine 을 직접 실행한다
         WM_WIKU = winemiku;
         WM_WIKU_CONFIG = winemiku.config;
         WM_WIKU_PATH = winemiku.path;

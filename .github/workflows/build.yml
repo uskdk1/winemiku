@@ -1,5 +1,5 @@
 # winemiku 를 빌드해서 winemiku.cachix.org 에 올린다 (wiku 의 재사용 워크플로).
-# 사용자가 nix run / home-manager 로 받을 때 패치된 모듈·DXVK 를 직접 컴파일하지 않고 캐시에서 받게 하려는 것.
+# 사용자가 wiku(home-manager)로 받을 때 패치된 모듈·DXVK 를 직접 컴파일하지 않고 캐시에서 받게 하려는 것.
 # PR(포크)에는 시크릿이 없으므로 받기만 하고 올리지 않는다.
 name: build
 

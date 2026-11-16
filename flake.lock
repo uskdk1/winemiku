@@ -29,11 +29,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794798686,
-        "narHash": "sha256-eo+CDEunNfqdDtCSc1SOVQjdPBWcpKl1hZehDk1vhQo=",
+        "lastModified": 1794817025,
+        "narHash": "sha256-Wud6L68LgSGSXwnttFGPMRpNgUMHwSHQdeoiv5ADKqQ=",
         "owner": "uskdk1",
         "repo": "wiku",
-        "rev": "e5ab9e85201fdcd013986e2b5d35a64627c17347",
+        "rev": "6fc5f0b3cbc52a23e1050c99eb1a0ece70c2e1a3",
         "type": "github"
       },
       "original": {

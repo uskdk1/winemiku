@@ -3,18 +3,16 @@
 nixpkgs Wine(`wineWow64Packages.stagingFull`, wine-staging)에 `patches/*.patch`를 얹은 커스텀 Wine.
 [wiku](https://github.com/uskdk1/wiku)(여러 Wine 변형과 prefix 관리)의 변형 `miku`로 만든다 (`flake.nix`의 `wiku.lib.mkWine`).
 
-## 사용 (Nix)
+**Nix 전용이고, 단독으로 배포하지 않는다.** 사용은 wiku로, 이 저장소는 패치 개발용이다.
 
-```bash
-nix run github:uskdk1/winemiku -- 설치파일.exe            # 실행 (아래 설정이 모두 적용됨)
-nix run github:uskdk1/winemiku -- --reset                 # prefix 초기화
-nix run github:uskdk1/winemiku -- --kill                  # 남은 Wine 프로세스 종료
-nix profile install github:uskdk1/winemiku               # 설치하면 wiku 명령으로
-```
+## 사용 (wiku)
 
-home-manager로 다른 변형·여러 prefix와 같이 쓰기 (wiku README 참고):
+home-manager에 변형으로 등록하고 `wiku` 명령으로 실행한다 (자세한 것은 wiku README):
 
 ```nix
+# flake inputs: wiku.url = "github:uskdk1/wiku";  winemiku.url = "github:uskdk1/winemiku";
+imports = [ inputs.wiku.homeManagerModules.default ];
+
 programs.wiku = {
   enable = true;
   wines.miku = inputs.winemiku.packages.x86_64-linux.default;
@@ -23,7 +21,13 @@ programs.wiku = {
 };
 ```
 
-- prefix: `~/.local/share/wiku/miku` (home-manager에서는 `~/.local/share/wiku/<이름>`), 템플릿: `~/.cache/wiku/templates/`
+```bash
+wiku kakao KakaoTalk_Setup.exe    # 설치 (끝나면 앱 메뉴에 "카카오톡 (kakao)")
+wiku kakao --reset                # prefix 초기화
+wiku kakao --kill                 # 남은 Wine 프로세스 종료
+```
+
+- prefix: `~/.local/share/wiku/<이름>`, 템플릿: `~/.cache/wiku/templates/`
 - Wayland 전용, 한국어 로캘·폰트, DXVK, 트레이 아이콘은 바(waybar 등)에 표시 (아래 "실행 환경" 참고).
   Wayland·DXVK·로캘은 wiku 토글이라 prefix마다 바꿀 수 있다 (기본값: `flake.nix`의 `defaults`).
 - `.#winemiku`(기본)는 nixpkgs 캐시의 Wine 위에 패치된 모듈만 덮어쓰고, 패치된 DXVK를 쓴다.
@@ -34,9 +38,9 @@ programs.wiku = {
 패치된 Wine·DXVK는 `https://winemiku.cachix.org`에 올라가 있다. 캐시를 쓰지 못하면 직접 빌드한다
 (패치된 Wine 모듈 약 4분 + DXVK 약 10분). Wine 본체는 cache.nixos.org에서 받는다.
 
-flake의 `nixConfig`에 캐시가 적혀 있어서 처음 `nix run` 할 때 쓸지 물어보지만,
-**Nix의 신뢰된 사용자(`trusted-users`)일 때만 적용된다.** NixOS 기본값(`trusted-users = root`)이면
-아래 경고와 함께 캐시를 무시하고 직접 빌드한다.
+이 flake의 `nixConfig`에도 캐시가 적혀 있지만, 이 저장소를 직접 빌드할 때(개발)만 쓰이고
+**Nix의 신뢰된 사용자(`trusted-users`)일 때만 적용된다.** home-manager에서 input으로 받을 때는 쓰이지 않으니
+시스템 설정에 넣어야 한다. 넣지 않으면 아래 경고와 함께 캐시를 무시하고 직접 빌드한다.
 
 ```
 warning: ignoring untrusted substituter 'https://winemiku.cachix.org', you are not a trusted user.
@@ -72,37 +76,43 @@ NixOS가 아니면 `/etc/nix/nix.conf`에 같은 내용을 넣거나(`extra-subs
 시스템에 Wine을 설치하지 않습니다. 모든 것이 이 폴더와 `/nix/store` 안에만 있습니다.
 
 ```bash
-nix develop          # 빌드 의존성 + 빌드된 vanilla wine + 헬퍼 함수
+nix develop          # 빌드 의존성 + 패치된 Wine(캐시) + 헬퍼 함수
 wm-prepare           # src/ 에 같은 버전 소스 풀기, 패치 적용, configure (최초 1회)
 # src/wine-*/dlls/<dll>/ 수정
 wm-build <dll>       # 그 DLL만 빌드해서 override/ 에 복사 (예: d3d11, winex11.drv, server=wineserver)
-wm-run app.exe       # 실행 (bin/winemiku 와 같음, WINEPREFIX=./prefix)
+wm-run app.exe       # 실행 (prefix 는 wiku 가 준비, wine 은 runtime/ 에서 직접. WINEPREFIX=./prefix)
 wm-clean [app.exe]   # prefix 초기화 (+ 바로 실행)
 wm-kill [--all]      # Wine 프로세스 종료
 wm-patch <이름>      # 수정사항을 patches/NNNN-<이름>.patch 로 저장
-wm-reset             # override/ runtime/ 삭제 (vanilla 로 복귀)
+wm-reset             # override/ runtime/ 삭제 (patches/ 만 들어간 상태로 복귀)
 wm-prefix            # 템플릿 버리고 prefix 처음부터 재생성
 ```
 
-### 실행: wm-run = bin/winemiku
+### 실행: prefix는 wiku, 실행은 runtime
 
-`wm-run`(개발 셸)과 `bin/winemiku`(어디서나, nix develop 불필요)는 같은 실행기다.
-같은 prefix, 같은 Wine(runtime/ + override/), 같은 설정을 쓴다. 차이는 `wm-run`이 runtime/과 개발용 설정을 먼저 최신화한다는 것뿐.
-실제로는 wiku 실행기다: `scripts/dev.sh`가 배포용 설정(레지스트리·폰트·DXVK·env는 store)에서 wine만 `runtime/`으로,
-prefix는 `./prefix`, `override/` 반영을 켠 설정을 `.cache/wiku-dev.json`에 만들고, `bin/winemiku`가 그 설정으로 wiku를 부른다.
-`bin/winemiku list`, `bin/winemiku wines`도 된다.
+`wm-run`은 두 단계다.
+
+1. **prefix 준비는 wiku가**: `wiku miku --env`가 prefix 생성·갱신(레지스트리·폰트·DXVK), `override/` 반영을 하고
+   실행 환경(`WINEPREFIX`, 로캘, Wayland, 변형 env)을 출력한다. 그래서 개발 prefix는 배포판과 같다.
+2. **실행은 직접**: 그 환경으로 `runtime/bin/wine`을 바로 띄운다. wiku의 부가 동작(앱 메뉴 갱신·감시)은 없다.
+
+`scripts/dev.sh`가 배포용 설정(레지스트리·폰트·DXVK·env는 store)에서 wine만 `runtime/`으로, prefix는 `./prefix`,
+`override/` 반영을 켠 설정을 `.cache/wiku-dev.json`에, 그 설정으로 wiku를 부르는 실행기를 `.cache/wiku-dev`에 만든다
+(`wm-*`가 매번 최신화).
 
 ```bash
-bin/winemiku "C:\\users\\miku\\Desktop\\카카오톡.lnk"   # 설치한 앱 (바로가기 .lnk 또는 .exe)
-bin/winemiku --reset                                     # prefix 초기화 (≈1초)
-bin/winemiku --reset KakaoTalk_Setup.exe                 # 초기화 후 바로 설치
-bin/winemiku --kill                                      # 이 prefix의 Wine 프로세스 전부 종료 (트레이에 숨은 앱 포함)
-bin/winemiku --kill-all                                  # 이 저장소 Wine으로 뜬 모든 prefix
+wm-run prefix/drive_c/users/miku/Desktop/카카오톡.lnk     # 설치한 앱 (바로가기 .lnk 또는 .exe, "C:\\..." 경로도 됨)
+wm-clean                                                  # prefix 초기화 (≈1초)
+wm-clean KakaoTalk_Setup.exe                              # 초기화 후 바로 설치
+wm-kill                                                   # 이 prefix의 Wine 프로세스 전부 종료 (트레이에 숨은 앱 포함)
+wm-kill --all                                             # 이 저장소 Wine으로 뜬 모든 prefix
+.cache/wiku-dev miku app.exe                              # 배포판과 똑같이 wiku로 실행 (앱 메뉴도 만든다)
+.cache/wiku-dev miku --menus                              # 개발 prefix의 앱 메뉴 다시 만들기
 ```
 
-앱 메뉴 바로가기는 wiku가 prefix별로 만든다(`~/.local/share/applications/wiku/miku/`, 이름은 `카카오톡 (miku)`).
-Wine의 winemenubuilder는 꺼 두고, 실행이 끝나면 prefix의 시작 메뉴 `.lnk`로 만들며 `bin/winemiku`를 부른다.
-vanilla wine과 wiku 패키지(데이터 포함)는 `.gcroots/`로 GC에서 보호된다.
+앱 메뉴 바로가기(`~/.local/share/applications/wiku/miku/`, 이름은 `카카오톡 (miku)`)는 wiku로 실행할 때만 갱신된다.
+메뉴는 `nix develop` 밖에서 실행되므로 셸 함수가 아니라 `.cache/wiku-dev`를 부른다.
+배포용 runtime과 wiku 패키지(데이터 포함)는 `.gcroots/`로 GC에서 보호된다.
 
 ### prefix 초기화
 
@@ -120,7 +130,7 @@ vanilla wine과 wiku 패키지(데이터 포함)는 `.gcroots/`로 GC에서 보�
   - `patches/dxvk/0001`: 큰 이미지를 mipmap 없이 작게 줄여 그리는 앱을 위해 숨은 mipmap을 붙인다(`d3d11.autoGenerateMips`).
     카카오톡 광고 이미지(1200x600 → 약 120x60)가 자글자글해지는 문제. 윈도우는 이 광고를 WebView2로 그리는데,
     Wine에는 DirectComposition이 없어서 WebView2가 화면을 못 그린다. `KakaoTalkUI.exe`에서만 자동으로 켜진다.
-    끄기: `DXVK_CONFIG="d3d11.autoGenerateMips = False" bin/winemiku ...` (다른 앱에서 켜려면 `= True`)
+    끄기: `DXVK_CONFIG="d3d11.autoGenerateMips = False" wm-run ...` (다른 앱에서 켜려면 `= True`)
   - DXVK 소스 수정: `src/dxvk-<버전>/`에 소스를 풀고 git 기준점을 만든 뒤 고치고, `git diff > patches/dxvk/NNNN-<이름>.patch`.
     nixpkgs의 DXVK 버전이 바뀌면 패치를 새 버전에 맞춰 다시 만들어야 할 수 있다.
 - **트레이 아이콘**(`patches/0004`): 앱의 트레이 아이콘(`Shell_NotifyIcon`)을 StatusNotifierItem(D-Bus)으로 내보내
@@ -163,8 +173,9 @@ vanilla wine과 wiku 패키지(데이터 포함)는 `.gcroots/`로 GC에서 보�
     이 파일을 고치면 (Nix가 다시 만든 뒤) 다음 실행 때 자동 재적용. 개발 셸에서는 `nix develop`을 다시 하면 된다.
 - 터미널로 파이프한 출력(`wm-run reg query ... | less` 등)은 CP949라 깨져 보인다. `| iconv -f CP949`를 붙일 것.
 
-`wm-run`은 `runtime/`(vanilla wine의 심볼릭 링크 복제본, 내장 Tahoma·Arial 제외)에 `override/`의 DLL을 끼워 넣어 실행합니다.
-배포판(`nix run`)도 같은 방식이다. wiku의 `mkWine`이 vanilla wine 복제본에 `wine-miku-modules`를 덮어쓴다.
+`runtime/`은 배포용 runtime(vanilla wine + `wine-miku-modules`, 내장 Tahoma·Arial 제외)의 심볼릭 링크 복제본이고, 그 위에 `override/`의 DLL을 끼워 넣는다.
+그래서 `override/`가 비어 있어도 `patches/`가 다 들어간 Wine으로 돈다.
+배포용 runtime은 wiku의 `mkWine`이 만든다: vanilla wine 복제본에 `wine-miku-modules`를 덮어쓴다.
 `wine-miku-modules`는 같은 소스에 패치를 적용하고 configure한 뒤, 패치 파일의 `diff --git a/` 경로에서 뽑은 모듈
 (`dlls/<이름>`, `programs/<이름>`, `server`)만 `make`한다. 그래서 패치를 바꿔도 Wine 전체를 다시 컴파일하지 않는다.
 Wine은 설치 디렉터리를 `WINEDLLPATH`보다 먼저 찾기 때문에 `WINEDLLPATH`로는 빌트인 DLL을 덮어쓸 수 없습니다.
@@ -178,6 +189,6 @@ Wine은 설치 디렉터리를 `WINEDLLPATH`보다 먼저 찾기 때문에 `WINE
 
 ## 배포
 
-- **Nix 사용자**: 이 저장소 + Cachix 바이너리 캐시 (위 "바이너리 캐시" 참고)
-- **그 외**: 같은 Wine 버전이면 `override/*-windows/*.dll` 만 전달 가능, 또는 `patches/` 배포
+- wiku 변형으로만 배포한다 (`packages.default`를 `programs.wiku.wines`에 등록). 빌드 결과는 CI가 Cachix에 올린다
+  (`.github/workflows/build.yml`, wiku의 재사용 워크플로). Nix 없이 쓰는 방법은 지원하지 않는다.
 - **라이선스**: Wine은 LGPL-2.1-or-later. 바이너리 배포 시 `patches/`(수정 소스)를 함께 공개할 것.

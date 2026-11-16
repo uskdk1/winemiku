@@ -70,39 +70,43 @@ wm-build() {
     done
 }
 
-# runtime/ = vanilla wine 의 심볼릭 링크 복제본 (+ 실행 시 wiku 가 override/ 를 반영).
+# runtime/ = 배포용 runtime(WM_WIKU_RUNTIME: vanilla wine + 패치된 모듈, 내장 Tahoma·Arial 제외)의
+# 심볼릭 링크 복제본. 그 위에 override/(wm-build 결과)를 덮어쓴다 (wiku 가 --env 때 반영).
+# 그래서 override/ 가 비어 있어도 patches/ 가 다 들어간 Wine 으로 돈다.
 # Wine 은 ntdll.so 의 realpath 기준 디렉터리를 WINEDLLPATH 보다 먼저 찾기 때문에
 # (dlls/ntdll/unix/loader.c set_dll_path) WINEDLLPATH 로는 빌트인 DLL 을 덮어쓸 수 없다.
 # 그래서 wine 실행파일과 ntdll.so 만 실제 복사해서 기준 디렉터리를 runtime/ 으로 옮긴다.
-# (배포용은 wiku 의 mkWine 이 같은 방식으로 store 에 만든다)
 #
-# 실행은 wiku 실행기가 한다. 배포용 설정(WM_WIKU_CONFIG: prefix 레지스트리·폰트·DXVK·env 는 store)에서
-# wine 만 runtime/ 으로, prefix 는 ./prefix, override/ 반영을 켠 개발용 설정을 .cache/ 에 만든다.
-# bin/winemiku 가 nix develop 없이 그 설정으로 실행한다 (앱 바로가기도 이걸 부른다).
+# prefix 준비는 wiku 가, 실행은 wm-run 이 runtime/bin/wine 으로 직접 한다 (wiku <prefix> --env).
+# 배포용 설정(WM_WIKU_CONFIG: prefix 레지스트리·폰트·DXVK·env 는 store)에서 wine 만 runtime/ 으로,
+# prefix 는 ./prefix, override/ 반영을 켠 개발용 설정을 .cache/ 에 만든다.
 WM_RUNTIME="$WM_ROOT/runtime"
 _wm_runtime() {
-    if [ "$(cat "$WM_RUNTIME/.vanilla" 2>/dev/null)" != "$WINE_VANILLA" ]; then
+    if [ "$(cat "$WM_RUNTIME/.base" 2>/dev/null)" != "$WM_WIKU_RUNTIME" ]; then
+        [ -x "$WM_RUNTIME/bin/wineserver" ] && "$WM_RUNTIME/bin/wineserver" -k 2>/dev/null
         rm -rf "$WM_RUNTIME"
-        cp -rs "$WINE_VANILLA/." "$WM_RUNTIME/" && chmod -R u+w "$WM_RUNTIME" || return 1
+        cp -rs "$WM_WIKU_RUNTIME/." "$WM_RUNTIME/" && chmod -R u+w "$WM_RUNTIME" || return 1
         local f
         for f in bin/wine bin/.wine lib/wine/x86_64-unix/{wine,wine-preloader,ntdll.so}; do
-            [ -e "$WINE_VANILLA/$f" ] || continue
-            rm -f "$WM_RUNTIME/$f"; cp -L "$WINE_VANILLA/$f" "$WM_RUNTIME/$f"
+            [ -e "$WM_WIKU_RUNTIME/$f" ] || continue
+            rm -f "$WM_RUNTIME/$f"; cp -L "$WM_WIKU_RUNTIME/$f" "$WM_RUNTIME/$f"
         done
-        # staging 등: bin/wine 이 store 경로를 박은 바이너리 래퍼면 runtime 용으로 다시 만든다
-        python3 -I "$WM_ROOT/scripts/rewrap.py" "$WINE_VANILLA" "$WM_RUNTIME" >/dev/null || return 1
-        echo "$WINE_VANILLA" > "$WM_RUNTIME/.vanilla"
+        # bin/wine 은 배포용 runtime 경로를 박은 셸 래퍼 (wiku 의 rewrap.py) -> runtime/ 으로
+        if head -c 9 "$WM_RUNTIME/bin/wine" | grep -q '^#!/bin/sh'; then
+            sed -i "s|$WM_WIKU_RUNTIME|$WM_RUNTIME|g" "$WM_RUNTIME/bin/wine" || return 1
+        fi
+        echo "$WM_WIKU_RUNTIME" > "$WM_RUNTIME/.base"
     fi
-    # 내장 Tahoma/Arial 빼기 (flake.nix runtimeHook 과 같은 이유)
-    rm -f "${WM_RUNTIME:?}"/share/wine/fonts/{tahoma,tahomabd,arial}.ttf
-    # 예전 bin/winemiku 가 쓰던 데이터 (이제 wiku 가 store 에서 직접 쓴다)
-    rm -f "$WM_RUNTIME/prefix.reg" "$WM_RUNTIME/cjk-fonts" "$WM_RUNTIME/fonts" "$WM_RUNTIME/dxvk"
-    _wm_gcroot wine "$WINE_VANILLA"
+    _wm_gcroot runtime "$WM_WIKU_RUNTIME"
     _wm_gcroot wiku "$WM_WIKU"
+    rm -f "$WM_ROOT/.gcroots/wine"   # 예전 (vanilla 바탕)
     _wm_dev_config
 }
 
-# 개발용 wiku 설정 (.cache/wiku-dev.json) + 그 설정으로 wiku 를 부르는 실행기 (.cache/wiku-dev)
+# 개발용 wiku 설정 (.cache/wiku-dev.json) + 그 설정으로 wiku 를 부르는 실행기 (.cache/wiku-dev).
+# nix develop 없이도 돌아서, 개발 prefix 의 앱 메뉴 바로가기(.desktop)도 이걸 부른다 (WIKU_SELF).
+#   .cache/wiku-dev miku app.exe (배포판처럼 wiku 로 실행) | --env | --reset | --kill | --menus
+#   .cache/wiku-dev list | wines | --kill-all
 WM_DEV="$WM_ROOT/.cache/wiku-dev"
 _wm_dev_config() {
     mkdir -p "$WM_ROOT/.cache"
@@ -114,12 +118,12 @@ _wm_dev_config() {
     mv -f "$WM_DEV.json.new" "$WM_DEV.json"
     cat > "$WM_DEV.new" <<EOF
 #!/bin/sh
-# scripts/dev.sh 가 만든다: 개발용 설정으로 wiku 실행 (bin/winemiku 가 부른다)
+# scripts/dev.sh 가 만든다: 개발용 설정으로 wiku 실행 (wm-run, 개발 prefix 의 앱 메뉴가 부른다)
 export PATH="$WM_WIKU_PATH:\$PATH"
 export WIKU_CONFIG="$WM_DEV.json"
 export WIKU_USER_CONFIG="$WM_ROOT/.cache/wiku-dev-user.json"
 export WIKU_TEMPLATES="$WM_ROOT/.cache/templates"
-export WIKU_SELF="$WM_ROOT/bin/winemiku"
+export WIKU_SELF="$WM_DEV"
 exec "$WM_WIKU/libexec/wiku" "\$@"
 EOF
     chmod +x "$WM_DEV.new" && mv -f "$WM_DEV.new" "$WM_DEV"
@@ -132,23 +136,31 @@ _wm_gcroot() {
     nix-store --add-root "$WM_ROOT/.gcroots/$1" --realise "$2" >/dev/null
 }
 
-# 실행은 전부 bin/winemiku (-> 개발용 wiku) 가 한다 (Wayland, 한국어, override 반영, prefix 자동 생성).
-# 앱 바로가기도 같은 실행기를 쓴다. 예: wm-run winecfg
+# 실행: prefix 준비(생성·갱신, override 반영)와 실행 환경(Wayland, 한국어, 변형 env)은 wiku 가 맞추고,
+# wine 은 runtime/bin/wine 으로 직접 띄운다 (앱 메뉴 갱신 등 wiku 의 부가 동작 없음). 예: wm-run winecfg
+# 배포판과 똑같이 wiku 로 띄우려면: .cache/wiku-dev miku app.exe
 wm-run() {
     _wm_runtime || return 1
-    "$WM_ROOT/bin/winemiku" miku "$@"
+    local env; env=$("$WM_DEV" miku --env) || return 1
+    (
+        eval "$env"
+        # .exe 가 아닌 파일(.lnk 등)은 start.exe /exec 로 가는데 상대 유닉스 경로를 못 연다
+        if [[ "$1" == */* && "$1" != /* && -e "$1" ]]; then set -- "$(realpath -s -- "$1")" "${@:2}"; fi
+        exec "$WIKU_WINE" "$@"
+    )
 }
 
 # 이 prefix 의 Wine 프로세스 종료 (트레이에 숨은 앱 포함). 모든 prefix: wm-kill --all
 wm-kill() {
     _wm_runtime || return 1
-    if [ "$1" = --all ]; then "$WM_ROOT/bin/winemiku" --kill-all; else "$WM_ROOT/bin/winemiku" miku --kill; fi
+    if [ "$1" = --all ]; then "$WM_DEV" --kill-all; else "$WM_DEV" miku --kill; fi
 }
 
 # prefix 초기화 (drive_c + 레지스트리 + 이 prefix 의 메뉴 항목). 템플릿에서 즉시 다시 만든다
 wm-clean() {
     _wm_runtime || return 1
-    "$WM_ROOT/bin/winemiku" miku --reset "$@"
+    "$WM_DEV" miku --reset || return 1
+    [ $# -eq 0 ] || wm-run "$@"
 }
 
 # 템플릿 버리고 prefix 처음부터 재생성.
@@ -159,7 +171,7 @@ wm-prefix() {
     wm-clean
 }
 
-# override/ 를 비우고 vanilla 상태로 되돌리기
+# override/ 를 비우고 patches/ 만 들어간 상태(배포용 runtime)로 되돌리기
 wm-reset() {
     [ -x "$WM_RUNTIME/bin/wineserver" ] && "$WM_RUNTIME/bin/wineserver" -k 2>/dev/null
     rm -rf "$WM_OVERRIDE" "$WM_RUNTIME"
@@ -183,5 +195,5 @@ wm-patch() {
     echo "저장됨: $out"
 }
 
-echo "winemiku 개발 셸 (wine $(${WINE_VANILLA}/bin/wine --version 2>/dev/null))"
+echo "winemiku 개발 셸 (wine $("$WM_WIKU_RUNTIME/bin/wine" --version 2>/dev/null) + patches/)"
 echo "  wm-prepare | wm-build <dll> | wm-run <exe> | wm-patch <이름> | wm-clean | wm-kill | wm-reset | wm-prefix"
