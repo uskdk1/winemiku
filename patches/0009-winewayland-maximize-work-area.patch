@@ -1,16 +1,101 @@
 diff --git a/dlls/winewayland.drv/display.c b/dlls/winewayland.drv/display.c
-index 1d46d64..b9d34a7 100644
+index 1d46d64..fcdd0ab 100644
 --- a/dlls/winewayland.drv/display.c
 +++ b/dlls/winewayland.drv/display.c
-@@ -39,6 +39,7 @@ struct output_info
- {
-     int x, y;
-     struct wayland_output_state *output;
-+    struct wayland_output *wayland_output;
- };
+@@ -185,6 +185,85 @@ static void output_info_array_arrange_physical_coords(struct wl_array *output_in
+           output_info_cmp_primary_x_y);
+ }
  
- static int output_info_cmp_primary_x_y(const void *va, const void *vb)
-@@ -215,11 +216,34 @@ static void wayland_add_device_monitor(const struct gdi_device_manager *device_m
++/**********************************************************************
++ *          Work areas
++ *
++ * Wayland has no request for the work area (the output minus the bars), but
++ * xdg-shell tells a toplevel what matters about it: the size it gets when
++ * maximized (xdg_toplevel.configure with the maximized state). Win32 needs
++ * it: the client area of a maximized window is the work area, and apps that
++ * insist on that (Qt) fight the compositor forever if its maximized size is
++ * different. So until a window has been maximized on a monitor, its work
++ * area is the whole monitor. (xdg_toplevel.configure_bounds is no use: it
++ * is the work area for some compositors, but the output or the work area
++ * minus gaps for others, changing with the window's state.)
++ *
++ * The toplevels' processes report these sizes to the desktop process (the
++ * only one updating the display devices) with WM_WAYLAND_SET_WORK_AREA.
++ * They are kept by monitor origin, in the monitor's physical pixels.
++ */
++struct work_area
++{
++    int x, y, width, height;
++};
++
++static pthread_mutex_t work_area_mutex = PTHREAD_MUTEX_INITIALIZER;
++static struct work_area work_areas[16];
++static unsigned int work_area_count;
++
++/* Returns whether the work area changed. */
++BOOL wayland_set_work_area(int x, int y, int width, int height)
++{
++    struct work_area *area = NULL;
++    BOOL changed = FALSE;
++    unsigned int i;
++
++    if (width <= 0 || height <= 0) return FALSE;
++
++    pthread_mutex_lock(&work_area_mutex);
++    for (i = 0; i < work_area_count; i++)
++        if (work_areas[i].x == x && work_areas[i].y == y) area = &work_areas[i];
++    if (!area && work_area_count < ARRAY_SIZE(work_areas))
++    {
++        area = &work_areas[work_area_count++];
++        memset(area, 0, sizeof(*area));
++        area->x = x;
++        area->y = y;
++    }
++    if (area && (area->width != width || area->height != height))
++    {
++        area->width = width;
++        area->height = height;
++        changed = TRUE;
++    }
++    pthread_mutex_unlock(&work_area_mutex);
++
++    TRACE("monitor=%d,%d work area %dx%d%s\n", x, y, width, height, changed ? " (changed)" : "");
++    return changed;
++}
++
++static BOOL get_work_area_size(const RECT *monitor, SIZE *size)
++{
++    BOOL ret = FALSE;
++    unsigned int i;
++
++    pthread_mutex_lock(&work_area_mutex);
++    for (i = 0; i < work_area_count; i++)
++    {
++        const struct work_area *area = &work_areas[i];
++        if (area->x != monitor->left || area->y != monitor->top) continue;
++        /* stale (the output changed) or from a window that is really
++         * on another output than Win32 thinks */
++        if (area->width > monitor->right - monitor->left ||
++            area->height > monitor->bottom - monitor->top) continue;
++        size->cx = area->width;
++        size->cy = area->height;
++        ret = TRUE;
++    }
++    pthread_mutex_unlock(&work_area_mutex);
++    return ret;
++}
++
+ static void wayland_add_device_gpu(const struct gdi_device_manager *device_manager,
+                                    void *param)
+ {
+@@ -209,17 +288,38 @@ static void wayland_add_device_monitor(const struct gdi_device_manager *device_m
+                                        struct output_info *primary)
+ {
+     struct gdi_monitor monitor = {0};
++    SIZE work;
+ 
+     SetRect(&monitor.rc_monitor, output_info->x, output_info->y,
+             output_info->x + output_info->output->current_mode->width,
              output_info->y + output_info->output->current_mode->height);
      OffsetRect(&monitor.rc_monitor, -primary->x, -primary->y);
  
@@ -19,24 +104,21 @@ index 1d46d64..b9d34a7 100644
  
 -    TRACE("name=%s rc_monitor=rc_work=%s\n",
 -          output_info->output->name, wine_dbgstr_rect(&monitor.rc_monitor));
-+    /* The work area comes from the probe (see wayland_output.c), which only
-+     * gives its size, in logical pixels. Assume the bars are at the top and
-+     * left, unless the tray was last clicked in the bottom half. */
-+    if (output_info->wayland_output->work_w > 0 && output_info->wayland_output->work_h > 0 &&
-+        output_info->output->logical_w > 0 && output_info->output->logical_h > 0)
++    /* The work area is learned from the toplevels (see wayland_set_work_area),
++     * which only gives its size. Assume the bars are at the top and left,
++     * unless the tray was last clicked in the bottom half. */
++    if (get_work_area_size(&monitor.rc_monitor, &work))
 +    {
 +        const struct wayland_output_state *state = output_info->output;
-+        int dx = (state->logical_w - output_info->wayland_output->work_w) *
-+                 state->current_mode->width / state->logical_w;
-+        int dy = (state->logical_h - output_info->wayland_output->work_h) *
-+                 state->current_mode->height / state->logical_h;
++        int dx = monitor.rc_monitor.right - monitor.rc_monitor.left - work.cx;
++        int dy = monitor.rc_monitor.bottom - monitor.rc_monitor.top - work.cy;
 +        POINT click;
 +        BOOL bottom = process_wayland.initialized && wayland_systray_last_click(&click) &&
 +                      click.x >= state->logical_x && click.x < state->logical_x + state->logical_w &&
 +                      click.y - state->logical_y > state->logical_h / 2;
 +
-+        if (dx > 0 && dx < monitor.rc_work.right - monitor.rc_work.left) monitor.rc_work.left += dx;
-+        if (dy > 0 && dy < monitor.rc_work.bottom - monitor.rc_work.top)
++        if (dx > 0) monitor.rc_work.left += dx;
++        if (dy > 0)
 +        {
 +            if (bottom) monitor.rc_work.bottom -= dy;
 +            else monitor.rc_work.top += dy;
@@ -48,167 +130,6 @@ index 1d46d64..b9d34a7 100644
  
      device_manager->add_monitor(&monitor, param);
  }
-@@ -285,7 +309,11 @@ UINT WAYLAND_UpdateDisplayDevices(const struct gdi_device_manager *device_manage
-     {
-         if (!output->current.current_mode) continue;
-         output_info = wl_array_add(&output_info_array, sizeof(*output_info));
--        if (output_info) output_info->output = &output->current;
-+        if (output_info)
-+        {
-+            output_info->output = &output->current;
-+            output_info->wayland_output = output;
-+        }
-         else ERR("Failed to allocate space for output_info\n");
-     }
- 
-diff --git a/dlls/winewayland.drv/wayland_output.c b/dlls/winewayland.drv/wayland_output.c
-index f76881a..78a1442 100644
---- a/dlls/winewayland.drv/wayland_output.c
-+++ b/dlls/winewayland.drv/wayland_output.c
-@@ -123,6 +123,125 @@ static void maybe_init_display_devices(void)
-     NtUserPostMessage(desktop_hwnd, WM_WAYLAND_INIT_DISPLAY_DEVICES, 0, 0);
- }
- 
-+/**********************************************************************
-+ *          Work area probe
-+ *
-+ * Wayland doesn't tell clients the work area (the output minus the bars'
-+ * exclusive zones), but a layer surface anchored to all edges with an
-+ * exclusive zone of 0 is given exactly that size by the compositor. Win32
-+ * needs the work area: a maximized window's client area is the work area,
-+ * and the compositor's maximized size must match it, else apps that insist
-+ * on it (Qt) fight the compositor forever.
-+ */
-+static void work_probe_destroy(struct wayland_output *output)
-+{
-+    if (output->work_layer) zwlr_layer_surface_v1_destroy(output->work_layer);
-+    if (output->work_viewport) wp_viewport_destroy(output->work_viewport);
-+    if (output->work_surface) wl_surface_destroy(output->work_surface);
-+    if (output->work_buffer) wayland_shm_buffer_unref(output->work_buffer);
-+    output->work_layer = NULL;
-+    output->work_viewport = NULL;
-+    output->work_surface = NULL;
-+    output->work_buffer = NULL;
-+}
-+
-+static void work_probe_handle_configure(void *data, struct zwlr_layer_surface_v1 *layer_surface,
-+                                        uint32_t serial, uint32_t width, uint32_t height)
-+{
-+    struct wayland_output *output = data;
-+    BOOL changed;
-+
-+    zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
-+    if (width && height)
-+    {
-+        wp_viewport_set_destination(output->work_viewport, width, height);
-+        wl_surface_attach(output->work_surface, output->work_buffer->wl_buffer, 0, 0);
-+        wl_surface_damage_buffer(output->work_surface, 0, 0, 1, 1);
-+    }
-+    wl_surface_commit(output->work_surface);
-+    wl_display_flush(process_wayland.wl_display);
-+
-+    pthread_mutex_lock(&process_wayland.output_mutex);
-+    changed = output->work_w != width || output->work_h != height;
-+    output->work_w = width;
-+    output->work_h = height;
-+    pthread_mutex_unlock(&process_wayland.output_mutex);
-+
-+    TRACE("output=%s work area %ux%u%s\n", output->current.name, width, height,
-+          changed ? " (changed)" : "");
-+    if (changed) maybe_init_display_devices();
-+}
-+
-+static void work_probe_handle_closed(void *data, struct zwlr_layer_surface_v1 *layer_surface)
-+{
-+    TRACE("output=%p\n", data);
-+}
-+
-+static const struct zwlr_layer_surface_v1_listener work_probe_listener =
-+{
-+    work_probe_handle_configure,
-+    work_probe_handle_closed,
-+};
-+
-+static void work_probe_create(struct wayland_output *output)
-+{
-+    struct wl_region *region;
-+
-+    if (output->work_surface || !process_wayland.work_probes) return;
-+    if (!process_wayland.zwlr_layer_shell_v1 || !process_wayland.wp_viewporter) return;
-+
-+    if (!(output->work_buffer = wayland_shm_buffer_create(1, 1, WL_SHM_FORMAT_ARGB8888)) ||
-+        !(output->work_surface = wl_compositor_create_surface(process_wayland.wl_compositor)))
-+        goto failed;
-+    memset(output->work_buffer->map_data, 0, output->work_buffer->map_size); /* transparent */
-+    wl_surface_set_user_data(output->work_surface, NULL);
-+    /* never takes input */
-+    if ((region = wl_compositor_create_region(process_wayland.wl_compositor)))
-+    {
-+        wl_surface_set_input_region(output->work_surface, region);
-+        wl_region_destroy(region);
-+    }
-+    if (!(output->work_viewport = wp_viewporter_get_viewport(process_wayland.wp_viewporter,
-+                                                             output->work_surface)))
-+        goto failed;
-+    if (!(output->work_layer =
-+          zwlr_layer_shell_v1_get_layer_surface(process_wayland.zwlr_layer_shell_v1,
-+                                                output->work_surface, output->wl_output,
-+                                                ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
-+                                                "wine-work-area")))
-+        goto failed;
-+    zwlr_layer_surface_v1_add_listener(output->work_layer, &work_probe_listener, output);
-+    zwlr_layer_surface_v1_set_anchor(output->work_layer,
-+                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-+                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-+    zwlr_layer_surface_v1_set_size(output->work_layer, 0, 0);
-+    zwlr_layer_surface_v1_set_exclusive_zone(output->work_layer, 0);
-+    wl_surface_commit(output->work_surface);
-+    wl_display_flush(process_wayland.wl_display);
-+    TRACE("output=%s\n", output->current.name);
-+    return;
-+
-+failed:
-+    ERR("failed to create the work area probe for %s\n", output->current.name);
-+    work_probe_destroy(output);
-+}
-+
-+/**********************************************************************
-+ *          wayland_output_enable_work_probes
-+ *
-+ * Called in the desktop process (the only one updating the display devices).
-+ */
-+void wayland_output_enable_work_probes(void)
-+{
-+    struct wayland_output *output;
-+
-+    process_wayland.work_probes = TRUE;
-+    pthread_mutex_lock(&process_wayland.output_mutex);
-+    wl_list_for_each(output, &process_wayland.output_list, link)
-+        work_probe_create(output);
-+    pthread_mutex_unlock(&process_wayland.output_mutex);
-+}
-+
- static void wayland_output_mode_free_rb(struct rb_entry *entry, void *ctx)
- {
-     free(RB_ENTRY_VALUE(entry, struct wayland_output_mode, entry));
-@@ -179,6 +298,8 @@ static void wayland_output_done(struct wayland_output *output)
- 
-     pthread_mutex_unlock(&process_wayland.output_mutex);
- 
-+    work_probe_create(output); /* for outputs that appear later */
-+
-     TRACE("name=%s logical=%d,%d+%dx%d\n",
-           output->current.name, output->current.logical_x, output->current.logical_y,
-           output->current.logical_w, output->current.logical_h);
-@@ -371,6 +492,8 @@ void wayland_output_destroy(struct wayland_output *output)
-     wl_list_remove(&output->link);
-     pthread_mutex_unlock(&process_wayland.output_mutex);
- 
-+    work_probe_destroy(output);
-+
-     wayland_output_state_deinit(&output->pending);
-     wayland_output_state_deinit(&output->current);
-     if (output->zxdg_output_v1)
 diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
 index e90be0a..90fbf10 100644
 --- a/dlls/winewayland.drv/wayland_surface.c
@@ -225,7 +146,7 @@ index e90be0a..90fbf10 100644
      HMONITOR hmonitor;
      MONITORINFO mi;
 diff --git a/dlls/winewayland.drv/wayland_systray.c b/dlls/winewayland.drv/wayland_systray.c
-index 311f839..8732474 100644
+index 311f839..501834f 100644
 --- a/dlls/winewayland.drv/wayland_systray.c
 +++ b/dlls/winewayland.drv/wayland_systray.c
 @@ -84,6 +84,24 @@ BOOL wayland_systray_take_menu_pos(POINT *pos)
@@ -253,51 +174,28 @@ index 311f839..8732474 100644
  #ifdef SONAME_LIBDBUS_1
  
  #define WATCHER_NAME    "org.kde.StatusNotifierWatcher"
-@@ -877,6 +895,8 @@ NTSTATUS waylanddrv_unix_systray_init(void *arg)
-     const char *env = getenv("WINE_WAYLAND_SNI");
- 
-     if (!process_name || strcmp(process_name, "explorer.exe")) return STATUS_NOT_SUPPORTED;
-+    /* the desktop process also learns the outputs' work areas */
-+    wayland_output_enable_work_probes();
-     if (env && !strcmp(env, "0")) return STATUS_NOT_SUPPORTED;
-     if (pipe2(wake_pipe, O_CLOEXEC | O_NONBLOCK)) return STATUS_UNSUCCESSFUL;
-     dbus_threads_init_default();
 diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
-index d8dd276..3d9f027 100644
+index d8dd276..8dc333b 100644
 --- a/dlls/winewayland.drv/waylanddrv.h
 +++ b/dlls/winewayland.drv/waylanddrv.h
-@@ -185,6 +185,7 @@ struct wayland
-     struct zwp_text_input_manager_v3 *zwp_text_input_manager_v3;
-     struct zwlr_data_control_manager_v1 *zwlr_data_control_manager_v1;
-     struct zwlr_layer_shell_v1 *zwlr_layer_shell_v1;
-+    BOOL work_probes;      /* probe the outputs' work areas (desktop process) */
-     struct wl_data_device_manager *wl_data_device_manager;
-     struct xdg_toplevel_icon_manager_v1 *xdg_toplevel_icon_manager_v1;
-     struct wp_cursor_shape_manager_v1 *wp_cursor_shape_manager_v1;
-@@ -232,6 +233,13 @@ struct wayland_output
-     unsigned int pending_flags;
-     struct wayland_output_state pending;
-     struct wayland_output_state current;
-+    /* work area probe (desktop process only): an invisible layer surface that
-+     * respects exclusive zones, so its size is the output minus the bars */
-+    struct wl_surface *work_surface;
-+    struct zwlr_layer_surface_v1 *work_layer;
-+    struct wp_viewport *work_viewport;
-+    struct wayland_shm_buffer *work_buffer;
-+    int work_w, work_h;    /* logical, 0 = unknown */
+@@ -72,6 +72,7 @@ enum wayland_window_message
+     WM_WAYLAND_INIT_DISPLAY_DEVICES = WM_WINE_FIRST_DRIVER_MSG,
+     WM_WAYLAND_CONFIGURE,
+     WM_WAYLAND_SET_FOREGROUND,
++    WM_WAYLAND_SET_WORK_AREA,
  };
  
- struct wayland_surface_config
-@@ -341,6 +349,8 @@ NTSTATUS waylanddrv_unix_systray_run(void *arg);
+ enum wayland_surface_config_state
+@@ -341,6 +342,8 @@ NTSTATUS waylanddrv_unix_systray_run(void *arg);
  BOOL wayland_output_create(uint32_t id, uint32_t version);
  void wayland_output_destroy(struct wayland_output *output);
  void wayland_output_use_xdg_extension(struct wayland_output *output);
-+void wayland_output_enable_work_probes(void);
++BOOL wayland_set_work_area(int x, int y, int width, int height);
 +BOOL wayland_systray_last_click(POINT *pos);
  
  /**********************************************************************
   *          Wayland surface
-@@ -362,6 +372,7 @@ void wayland_surface_attach_shm(struct wayland_surface *surface,
+@@ -362,6 +365,7 @@ void wayland_surface_attach_shm(struct wayland_surface *surface,
                                  struct wayland_shm_buffer *shm_buffer,
                                  HRGN surface_damage_region);
  BOOL wayland_surface_reconfigure(struct wayland_surface *surface);
@@ -306,7 +204,7 @@ index d8dd276..3d9f027 100644
                                            enum wayland_surface_config_state state);
  RECT map_rect_to_surface(struct wayland_surface *surface, RECT rect);
 diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
-index 8e51a14..918c646 100644
+index 8e51a14..8a458a7 100644
 --- a/dlls/winewayland.drv/window.c
 +++ b/dlls/winewayland.drv/window.c
 @@ -150,6 +150,12 @@ static void wayland_win_data_get_config(struct wayland_win_data *data,
@@ -338,7 +236,71 @@ index 8e51a14..918c646 100644
      data->managed = managed;
  
      if (!surface)
-@@ -574,6 +587,23 @@ static void wayland_configure_window(HWND hwnd)
+@@ -492,11 +505,63 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+     wayland_win_data_release(data);
+ }
+ 
++/**********************************************************************
++ *           wayland_learn_work_area
++ *
++ * The size the compositor gives to a maximized toplevel is the work area of
++ * its monitor: tell the desktop process (see wayland_set_work_area), before
++ * the window is fitted to it. Returns whether the monitor's work area
++ * changed, and by how much each of its edges moved.
++ */
++static BOOL wayland_learn_work_area(HWND hwnd, RECT *moved)
++{
++    struct send_message_timeout_params params = {.flags = SMTO_ABORTIFHUNG, .timeout = 2000};
++    MONITORINFO mi = {.cbSize = sizeof(mi)}, new_mi = {.cbSize = sizeof(new_mi)};
++    struct wayland_surface *surface;
++    struct wayland_win_data *data;
++    HMONITOR monitor;
++    RECT rect = {0};
++    int width, height;
++
++    if (!(data = wayland_win_data_get(hwnd))) return FALSE;
++    if ((surface = data->wayland_surface) && wayland_surface_is_toplevel(surface) &&
++        surface->requested.serial &&
++        (surface->requested.state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED) &&
++        !(surface->requested.state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN))
++        rect = map_rect_from_surface(surface, surface->requested.rect);
++    wayland_win_data_release(data);
++
++    width = rect.right - rect.left;
++    height = rect.bottom - rect.top;
++    if (width <= 0 || height <= 0 || width > 0xffff || height > 0xffff) return FALSE;
++    if (!(monitor = NtUserMonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) ||
++        !NtUserGetMonitorInfo(monitor, &mi))
++        return FALSE;
++    if (mi.rcWork.right - mi.rcWork.left == width && mi.rcWork.bottom - mi.rcWork.top == height)
++        return FALSE;
++
++    TRACE("hwnd=%p monitor=%s work=%s maximized size %dx%d\n", hwnd,
++          wine_dbgstr_rect(&mi.rcMonitor), wine_dbgstr_rect(&mi.rcWork), width, height);
++    /* wp = monitor origin, lp = size; the display devices are updated on return */
++    NtUserMessageCall(NtUserGetDesktopWindow(), WM_WAYLAND_SET_WORK_AREA,
++                      MAKELONG(mi.rcMonitor.left, mi.rcMonitor.top), MAKELONG(width, height),
++                      &params, NtUserSendMessageTimeout, FALSE);
++
++    if (!NtUserGetMonitorInfo(monitor, &new_mi) || EqualRect(&new_mi.rcWork, &mi.rcWork))
++        return FALSE;
++    SetRect(moved, new_mi.rcWork.left - mi.rcWork.left, new_mi.rcWork.top - mi.rcWork.top,
++            new_mi.rcWork.right - mi.rcWork.right, new_mi.rcWork.bottom - mi.rcWork.bottom);
++    return TRUE;
++}
++
+ static void wayland_configure_window(HWND hwnd)
+ {
+     struct wayland_surface *surface;
+     INT width, height;
+     UINT flags = 0;
++    RECT work_moved = {0};
++    BOOL work_changed = wayland_learn_work_area(hwnd, &work_moved);
++    BOOL refit = FALSE;
+     uint32_t state;
+     DWORD style;
+     BOOL needs_enter_size_move = FALSE;
+@@ -574,6 +639,28 @@ static void wayland_configure_window(HWND hwnd)
      {
          flags |= SWP_NOSIZE;
      }
@@ -347,22 +309,27 @@ index 8e51a14..918c646 100644
 +     * size and sticks out of the monitor; the surface geometry shows just the
 +     * visible part (see wayland_surface_reconfigure_geometry). What has to
 +     * match the compositor's size is the client area, as on Windows where it
-+     * fills the work area; it does when the work area is known (see the work
-+     * area probe in wayland_output.c), and then there is nothing to resize.
-+     * Resizing the window to the compositor's size (which shrinks the client
-+     * area and uncovers the monitor) makes some apps (Qt) fight back in a
-+     * loop. */
++     * fills the work area; it does when the work area is known (it is the
++     * compositor's maximized size, see wayland_learn_work_area), and then
++     * there is nothing to resize. If the work area has just been learned
++     * from this very configure, the window was maximized to the old one:
++     * move and resize it by as much as the work area changed, like Windows
++     * does with maximized windows. Otherwise resizing the window to the
++     * compositor's size (which shrinks the client area and uncovers the
++     * monitor) makes some apps (Qt) fight back in a loop. */
 +    else if ((state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED) &&
 +             (surface->window.state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED))
 +    {
 +        RECT client = map_rect_to_surface(surface, data->rects.client);
 +        if (client.right - client.left == width && client.bottom - client.top == height)
 +            flags |= SWP_NOSIZE;
++        else if (work_changed)
++            refit = TRUE;
 +    }
  
      /* Detect a restore from an application-initiated minimize: the last
       * requested config placed the window at the offscreen sentinel position
-@@ -585,9 +615,22 @@ static void wayland_configure_window(HWND hwnd)
+@@ -585,9 +672,22 @@ static void wayland_configure_window(HWND hwnd)
      restoring_from_minimize = surface->window.rect.left <= -32000 &&
                                surface->window.rect.top  <= -32000 &&
                                surface->window.minimized;
@@ -386,3 +353,51 @@ index 8e51a14..918c646 100644
          surface->current = surface->processing;
          memset(&surface->processing, 0, sizeof(surface->processing));
          xdg_surface_ack_configure(surface->xdg_surface,
+@@ -597,9 +697,22 @@ static void wayland_configure_window(HWND hwnd)
+         return;
+     }
+ 
+-    SetRect(&rect, 0, 0, width, height);
+-    rect = map_rect_from_surface(surface, rect);
+-    OffsetRect(&rect, data->rects.window.left, data->rects.window.top);
++    if (refit)
++    {
++        rect = data->rects.window;
++        rect.left += work_moved.left;
++        rect.top += work_moved.top;
++        rect.right += work_moved.right;
++        rect.bottom += work_moved.bottom;
++        TRACE("hwnd=%p refitting the maximized window %s -> %s\n", hwnd,
++              wine_dbgstr_rect(&data->rects.window), wine_dbgstr_rect(&rect));
++    }
++    else
++    {
++        SetRect(&rect, 0, 0, width, height);
++        rect = map_rect_from_surface(surface, rect);
++        OffsetRect(&rect, data->rects.window.left, data->rects.window.top);
++    }
+ 
+     wayland_win_data_release(data);
+ 
+@@ -608,7 +721,8 @@ static void wayland_configure_window(HWND hwnd)
+     if (needs_enter_size_move) send_message(hwnd, WM_ENTERSIZEMOVE, 0, 0);
+     if (needs_exit_size_move) send_message(hwnd, WM_EXITSIZEMOVE, 0, 0);
+ 
+-    flags |= SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOMOVE;
++    flags |= SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER;
++    if (!refit) flags |= SWP_NOMOVE;
+     if (rect.left == rect.right || rect.bottom == rect.top) flags |= SWP_NOSIZE;
+ 
+     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+@@ -646,6 +760,11 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+     case WM_WAYLAND_SET_FOREGROUND:
+         NtUserSetForegroundWindowInternal(hwnd);
+         return 0;
++    case WM_WAYLAND_SET_WORK_AREA:
++        /* sent to the desktop window: wp = monitor origin, lp = size */
++        if (wayland_set_work_area((SHORT)LOWORD(wp), (SHORT)HIWORD(wp), LOWORD(lp), HIWORD(lp)))
++            NtUserCallNoParam(NtUserCallNoParam_DisplayModeChanged);
++        return 0;
+     default:
+         FIXME("got window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (long)wp, lp);
+         return 0;

@@ -15,7 +15,8 @@
 | [0006](#0006-gdi32-setbkmode-invalid) | gdi32 | `SetBkMode`에 이상한 값을 주면 투명으로 |
 | [0007](#0007-winewayland-systray-menu-probe) | winewayland.drv | 바가 클릭 좌표를 안 주면(wayle) 트레이 메뉴를 포인터 위치에 |
 | [0008](#0008-win32u-placement-unset-pos) | win32u | `SetWindowPlacement`의 (-1,-1) 위치는 "지정 안 함" |
-| [0009](#0009-winewayland-maximize-work-area) | winewayland.drv | 작업 영역(바 제외)을 알아내고, 최대화·복원을 Windows처럼 |
+| [0009](#0009-winewayland-maximize-work-area) | winewayland.drv | 작업 영역(바 제외)을 최대화 크기에서 배우고, 최대화·복원을 Windows처럼 |
+| [0010](#0010-winewayland-unfullscreen-size) | winewayland.drv | 컴포지터가 전체화면을 풀면 창을 이전 크기로 |
 | [dxvk 0001](#dxvk-0001-d3d11-auto-generate-mips) | DXVK d3d11 | 큰 이미지를 작게 그릴 때 숨은 mipmap |
 
 ---
@@ -155,18 +156,40 @@ Wine은 창을 컴포지터 크기로 줄이고, 앱은 다시 작업 영역 크
 "화면 크기의 일반 창"이 되고, win32u는 모니터를 덮는 창을 전체화면 앱으로 보고 커서를 가두고 크기를 고정한다.
 
 **수정**
-- **작업 영역 probe** (`wayland_output.c`): explorer(디스플레이 장치를 등록하는 프로세스)가 출력마다 보이지 않는 layer 표면(background 레이어,
-  투명, 입력 없음, 네 변에 앵커, exclusive zone 0)을 둔다. 컴포지터가 주는 그 크기가 곧 바를 뺀 작업 영역이다. 바뀌면(바가 켜지거나 꺼지면)
-  디스플레이 장치를 다시 등록한다. `display.c`가 `rcWork`로 보고한다. 위치는 알 수 없어 바가 **위·왼쪽**에 있다고 보고, 트레이를 아래쪽에서
-  클릭한 적이 있으면 아래로 본다.
-  그러면 Win32 최대화 창의 클라이언트 = 작업 영역 = 컴포지터의 최대화 크기라 아무것도 다툴 게 없다. 알림 토스트 같은 작업 영역 기준 위치도 맞는다.
+- **작업 영역 학습** (`display.c`, `window.c`): Wayland에는 작업 영역을 묻는 요청이 없지만, 표준 xdg-shell이 필요한 것을 알려 준다.
+  컴포지터가 **최대화 상태로 보내는 `xdg_toplevel.configure`의 크기**가 곧 그 모니터의 작업 영역 크기다.
+  앱 프로세스가 그 크기를 받으면(`wayland_learn_work_area`) 데스크톱 프로세스(explorer, 디스플레이 장치를 등록하는 쪽)에
+  `WM_WAYLAND_SET_WORK_AREA`로 알리고, explorer가 모니터별로 기억해 `rcWork`로 다시 등록한다 (`wayland_set_work_area`).
+  그 뒤에 창을 맞추므로 Win32 최대화 창의 클라이언트 = 작업 영역 = 컴포지터의 최대화 크기라 다툴 게 없다.
+  - 그 세션에서 **처음 최대화하기 전까지는** 작업 영역 = 모니터 전체다. 첫 최대화 때 작업 영역이 바뀌면, 이미 옛 작업 영역에 맞춰
+    최대화된 창은 바뀐 만큼 옮기고 줄인다 (Windows가 작업 영역이 바뀔 때 최대화 창에 하는 것과 같다).
+  - 위치는 알 수 없어 바가 **위·왼쪽**에 있다고 보고, 트레이를 아래쪽에서 클릭한 적이 있으면 아래로 본다.
+  - 특정 컴포지터 확장(wlr-layer-shell 등)을 쓰지 않는다. `xdg_toplevel.configure_bounds`도 쓰지 않는다: 컴포지터마다 뜻이 달라서
+    (작업 영역 / 출력 전체 / niri는 gap을 뺀 크기이고 창 상태에 따라 바뀐다) 최대화 크기와 맞는다는 보장이 없다.
 - `wayland_configure_window` (`window.c`): 최대화 configure 때 클라이언트 크기가 이미 같으면 크기를 바꾸지 않는다.
   컴포지터가 최대화를 풀었는데(끌어서 뗌) 크기를 안 주면 `WS_MAXIMIZE`만 지우지 않고 `SC_RESTORE`로 제대로 복원한다 (최소화 복원과 같은 경로).
 - `WAYLAND_WindowPosChanged`: 굵은 테두리(`WS_THICKFRAME`) 창은 모니터를 덮어도 크기 조절 가능으로 둔다 (min/max 고정 안 함).
 - `wayland_win_data_get_config`: 제목줄·굵은 테두리가 있는 창이 모니터 크기여도 xdg 전체화면으로 보내지 않는다 (일반 창으로 두어 옮기고 줄일 수 있게).
 
-**확인**: `WINEDEBUG=+waylanddrv`에서 `work_probe_handle_configure output=... work area WxH`, `wayland_add_device_monitor ... rc_work=(0,35)-(1920,1080)`.
-`niri msg windows`의 창 크기와 `GetClientRect`가 같아야 한다. 끄기: 없음 (layer-shell이 없는 컴포지터에서는 전처럼 작업 영역 = 모니터).
+**확인**: `WINEDEBUG=+waylanddrv`에서 최대화할 때 `wayland_learn_work_area ... maximized size WxH` →
+`wayland_set_work_area monitor=0,0 work area WxH (changed)` → `wayland_add_device_monitor ... rc_work=(0,35)-(1920,1080)`.
+컴포지터가 보는 창 크기(niri면 `niri msg windows`)와 `GetClientRect`가 같아야 한다. 끄기: 없음.
+
+---
+
+## 0010 winewayland-unfullscreen-size
+
+**문제**: 컴포지터 단축키로 창을 전체화면으로 했다가 풀면(다시 누르거나 끌어서) 창이 모니터 크기 그대로 남고,
+크기를 조절하기 전까지 마우스가 창 안에 갇힌다.
+
+**원인**: Win32에는 전체화면 상태가 없어서, 컴포지터가 전체화면으로 만들면 Wine은 창을 모니터 크기로 키우기만 한다.
+풀 때 컴포지터는 xdg-shell대로 상태 없는 `configure`에 이전 크기를 담아 보내는데, Wine은 상태 없는 configure의 크기를
+(쓸데없는 크기 변경을 피하려고) 무시한다. 그래서 "모니터 크기의 일반 창"이 남고, win32u는 그것을 전체화면 앱으로 보고 커서를 가둔다.
+
+**수정** (`dlls/winewayland.drv/window.c`, `wayland_configure_window`): 직전 상태가 전체화면이었고 새 configure에 전체화면이 없으면
+그 configure의 크기를 따른다. 컴포지터가 크기를 주지 않으면(0×0) 전체화면이 되기 직전에 기억해 둔 크기(`unfullscreen_size`)로 되돌린다.
+
+**확인**: `WINEDEBUG=+waylanddrv`에서 `leaving fullscreen, size WxH`.
 
 ---
 

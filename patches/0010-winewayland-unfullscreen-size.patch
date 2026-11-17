@@ -1,0 +1,69 @@
+diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
+index 8dc333b..06886d6 100644
+--- a/dlls/winewayland.drv/waylanddrv.h
++++ b/dlls/winewayland.drv/waylanddrv.h
+@@ -290,6 +290,7 @@ struct wayland_surface
+     struct wp_fractional_scale_v1 *wp_fractional_scale_v1;
+     struct wayland_shm_buffer *small_icon_buffer;
+     struct wayland_shm_buffer *big_icon_buffer;
++    SIZE unfullscreen_size; /* surface size before the compositor made it fullscreen */
+ 
+     enum wayland_surface_role role;
+     union
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 8a458a7..4777420 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -567,6 +567,7 @@ static void wayland_configure_window(HWND hwnd)
+     BOOL needs_enter_size_move = FALSE;
+     BOOL needs_exit_size_move = FALSE;
+     BOOL restoring_from_minimize = FALSE;
++    BOOL leaving_fullscreen;
+     struct wayland_win_data *data;
+     RECT rect, surface_rect;
+ 
+@@ -595,9 +596,25 @@ static void wayland_configure_window(HWND hwnd)
+     memset(&surface->requested, 0, sizeof(surface->requested));
+ 
+     state = surface->processing.state;
++    /* The compositor makes the window fullscreen, or ends that. Win32 has no
++     * fullscreen state: the window is just resized to the monitor, so it has
++     * to be resized back afterwards, else it stays a "normal" window of the
++     * monitor's size, which Win32 keeps treating as a fullscreen one (cursor
++     * clipped to it). */
++    if ((state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN) &&
++        !(surface->current.state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN) &&
++        !(surface->window.state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN))
++    {
++        RECT old = map_rect_to_surface(surface, data->rects.window);
++        surface->unfullscreen_size.cx = old.right - old.left;
++        surface->unfullscreen_size.cy = old.bottom - old.top;
++    }
++    leaving_fullscreen = (surface->current.state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN) &&
++                         !(state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN);
++
+     /* Ignore size hints if we don't have a state that requires strict
+      * size adherence, in order to avoid spurious resizes. */
+-    if (state)
++    if (state || leaving_fullscreen)
+     {
+         width = surface->processing.rect.right - surface->processing.rect.left;
+         height = surface->processing.rect.bottom - surface->processing.rect.top;
+@@ -606,6 +623,17 @@ static void wayland_configure_window(HWND hwnd)
+     {
+         width = height = 0;
+     }
++    if (leaving_fullscreen)
++    {
++        /* the compositor's size (normally the one from before), else ours */
++        if (!state && (!width || !height))
++        {
++            width = surface->unfullscreen_size.cx;
++            height = surface->unfullscreen_size.cy;
++        }
++        TRACE("hwnd=%p leaving fullscreen, size %dx%d\n", hwnd, width, height);
++        memset(&surface->unfullscreen_size, 0, sizeof(surface->unfullscreen_size));
++    }
+ 
+     if ((state & WAYLAND_SURFACE_CONFIG_STATE_RESIZING) && !surface->resizing)
+     {
