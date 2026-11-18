@@ -23,6 +23,7 @@
 | [0014](#0014-winewayland-keep-managed) | winewayland.drv | 보이는 동안 관리 창은 관리 창으로 유지 (팝업 순간이동) |
 | [0015](#0015-winewayland-empty-window) | winewayland.drv | 크기 0인 창(Delphi `TApplication`)은 화면에 안 띄우기 |
 | [0016](#0016-winewayland-screen-clip) | winewayland.drv | 화면 전체를 덮는 `ClipCursor`는 가두지 않기 |
+| [0017](#0017-winewayland-popup-owner) | winewayland.drv | owner 없는 팝업(말풍선·로고)은 바로 아래 창에 붙이기 |
 | [dxvk 0001](#dxvk-0001-d3d11-auto-generate-mips) | DXVK d3d11 | 큰 이미지를 작게 그릴 때 숨은 mipmap |
 
 ---
@@ -312,6 +313,24 @@ win32u가 모니터를 덮는 창에 거는 전체화면 클립(`clip_fullscreen
 
 **확인**: `WAYLAND_DEBUG=client`에 `confine_pointer`가 없고, `WINEDEBUG=+win`의 `window_from_point`가 클릭한 위치를 가리킨다.
 `WINEDEBUG=+cursor`에서 `covers the virtual screen, not confining`. 모니터가 여럿이면 가상 화면 전체를 덮는 클립만 해당한다.
+
+---
+
+## 0017 winewayland-popup-owner
+
+**문제**: 카카오톡 채팅방에서 스크롤할 때 스크롤바 옆에 뜨는 날짜 말풍선("날짜 표시")이 별도 창으로 엉뚱한 곳에 뜨고 포커스를 가져간다.
+FL Studio Settings의 About 페이지 로고도 별도의 이름 없는 창으로 뜬다.
+
+**원인**: 둘 다 owner가 없는 비관리 팝업이다 (`WS_POPUP`, `WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TOPMOST`).
+winewayland는 비관리 창을 owner의 subsurface로 붙이는데, owner가 없으면 win32u가 넘기는 `owner_hint`(창 왼쪽 위 모서리 바로 바깥
+한 점에 있는 창)를 쓴다. 카카오톡 말풍선은 채팅방 창 오른쪽 가장자리에서 2px 바깥에 떠서 그 점이 빗나간다. 붙일 곳이 없으면
+toplevel이 되고, Wayland에서는 클라이언트가 위치를 정할 수 없으니 컴포지터가 아무 데나 놓고 키보드 포커스를 준다.
+
+**수정** (`dlls/winewayland.drv/window.c`, `find_popup_owner`): 비관리 팝업이 화면에 있는 owner를 못 찾으면, 같은 프로세스의 toplevel 중
+z-order에서 그 팝업 바로 아래에 있고 팝업과 겹치거나 16px 안으로 닿는 창을 찾아 그 창의 subsurface로 붙인다.
+어떤 창과도 닿지 않는 팝업(화면 구석 알림 등)은 전처럼 toplevel이다. 트레이 메뉴(0004)는 layer 표면이 먼저라 상관없다.
+
+**확인**: `WINEDEBUG=+waylanddrv`에서 `attaching the popup to <hwnd>`, `WAYLAND_DEBUG=client`에 그 팝업의 `get_toplevel`이 없다.
 
 ---
 

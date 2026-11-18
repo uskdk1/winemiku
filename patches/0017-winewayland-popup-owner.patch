@@ -1,0 +1,80 @@
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index b910809..78c84c7 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -399,6 +399,47 @@ static BOOL has_owned_popups(HWND hwnd)
+     return ret;
+ }
+ 
++/* how far a popup may be from the window it belongs to, see find_popup_owner */
++#define POPUP_OWNER_SLACK 16
++
++/***********************************************************************
++ *		find_popup_owner
++ *
++ * The toplevel of this process right below an unmanaged popup that has no
++ * owner on screen, if it overlaps the popup or nearly touches it (e.g.
++ * KakaoTalk's date bubble just beside the chat window's scroll bar, owned by
++ * nothing). win32u's owner hint only looks at the point just outside the
++ * popup's top left corner.
++ */
++static HWND find_popup_owner(HWND hwnd, const RECT *rect)
++{
++    struct wayland_win_data *data;
++    RECT near = *rect, tmp;
++    HWND *list, ret = 0;
++    BOOL below = FALSE;
++    UINT i;
++
++    InflateRect(&near, POPUP_OWNER_SLACK, POPUP_OWNER_SLACK);
++    if (!(list = build_hwnd_list())) return 0;
++
++    for (i = 0; list[i] != HWND_BOTTOM && !ret; i++)
++    {
++        if (list[i] == hwnd)
++        {
++            below = TRUE;
++            continue;
++        }
++        if (!below || !(data = wayland_win_data_get(list[i]))) continue;
++        if (data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface) &&
++            intersect_rect(&tmp, &data->rects.window, &near))
++            ret = list[i];
++        wayland_win_data_release(data);
++    }
++
++    free(list);
++    return ret;
++}
++
+ static inline HWND get_active_window(void)
+ {
+     GUITHREADINFO info;
+@@ -481,7 +522,7 @@ BOOL WAYLAND_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const str
+ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
+                               const struct window_rects *new_rects, struct window_surface *surface)
+ {
+-    HWND owner = NtUserGetAncestor(hwnd, GA_ROOT);
++    HWND owner = NtUserGetAncestor(hwnd, GA_ROOT), popup_owner;
+     struct wayland_surface *owner_surface;
+     struct wayland_win_data *data, *owner_data;
+     BOOL managed, fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
+@@ -506,6 +547,18 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+     /* an owner that isn't on screen (no role, e.g. the empty TApplication window
+      * owning Delphi's forms) can't carry a subsurface: show it as a toplevel */
+     if (owner_surface && !owner_surface->role) owner_surface = NULL;
++    /* An unmanaged popup without an owner on screen would become a toplevel,
++     * which the compositor places anywhere and gives the keyboard focus to:
++     * attach it to the window it is shown over or next to instead. */
++    if (!owner_surface && !managed && surface &&
++        (NtUserGetWindowLongW(hwnd, GWL_STYLE) & (WS_POPUP | WS_VISIBLE)) == (WS_POPUP | WS_VISIBLE) &&
++        (popup_owner = find_popup_owner(hwnd, &new_rects->window)))
++    {
++        TRACE("hwnd=%p attaching the popup to %p\n", hwnd, popup_owner);
++        if (owner_data) wayland_win_data_release(owner_data);
++        owner_data = wayland_win_data_get(popup_owner);
++        owner_surface = owner_data ? owner_data->wayland_surface : NULL;
++    }
+ 
+     data->rects = *new_rects;
+     data->is_fullscreen = fullscreen;
