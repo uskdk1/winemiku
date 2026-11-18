@@ -1,0 +1,26 @@
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index d0b68f5..ba6c870 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -489,7 +489,20 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+     /* Get the managed state with win_data unlocked, as is_window_managed
+      * may need to query win_data information about other HWNDs and thus
+      * acquire the lock itself internally. */
+-    if (!(managed = is_window_managed(hwnd, swp_flags, fullscreen)) && surface) owner = owner_hint;
++    managed = is_window_managed(hwnd, swp_flags, fullscreen);
++    /* Like winex11, a shown window stays managed until it's hidden: a
++     * captionless popup is only managed while active, and losing activation
++     * (e.g. a click on its owner) would turn its xdg_toplevel into a
++     * subsurface and back on the next activation, which the compositor
++     * places anew each time. */
++    if (!managed && !(swp_flags & SWP_HIDEWINDOW) &&
++        (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE) &&
++        (data = wayland_win_data_get(hwnd)))
++    {
++        managed = data->managed;
++        wayland_win_data_release(data);
++    }
++    if (!managed && surface) owner = owner_hint;
+ 
+     if (!(data = wayland_win_data_get(hwnd))) return;
+     owner_data = owner && owner != hwnd ? wayland_win_data_get(owner) : NULL;

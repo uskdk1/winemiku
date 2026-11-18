@@ -257,6 +257,21 @@ FL 메인 창이 바 아래 영역(1920×1045)에 맞고, 마우스가 밖으로
 
 ---
 
+## 0014 winewayland-keep-managed
+
+**문제**: FL Studio 시작 팝업(Welcome)이 떠 있을 때 메인 창을 클릭하면 팝업이 다른 자리로 순간이동한다.
+
+**원인**: 제목줄 없는 팝업(`WS_POPUP`만)은 `is_window_managed`가 **활성 창일 때만** 관리 창으로 본다. 메인 창을 클릭해 팝업이
+비활성이 되면 다음 `WindowPosChanged`에서 관리 안 함으로 바뀌어 xdg_toplevel이 파괴되고 owner의 subsurface가 된다.
+다시 활성화되면 새 xdg_toplevel이 만들어지고, Wayland에서는 클라이언트가 위치를 정할 수 없으니 컴포지터가 새로 배치한다.
+
+**수정** (`dlls/winewayland.drv/window.c`, `WAYLAND_WindowPosChanged`): winex11처럼 보이는 동안 한 번 관리 창이 된 창은
+숨겨질 때까지 관리 창으로 둔다. 처음부터 관리 안 하는 창(0003의 `WS_EX_NOACTIVATE` 팝업 메뉴 등)은 그대로다.
+
+**확인**: `WAYLAND_DEBUG=client`에서 팝업이 떠 있는 동안 메인 창을 클릭해도 팝업의 `xdg_toplevel.destroy`/`get_toplevel`이 반복되지 않는다.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.
