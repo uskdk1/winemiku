@@ -237,6 +237,26 @@ FL 메인 창이 바 아래 영역(1920×1045)에 맞고, 마우스가 밖으로
 
 ---
 
+## 0013 winewayland-size-limits
+
+**문제**: FL Studio 메인 창을 최대화에서 풀면 크기를 줄이기만 하고 키울 수 없다. 창들이 정신없이 다시 그려지고,
+설정 창 클릭이 안 먹는다.
+
+**원인**
+- 굵은 테두리(`WS_THICKFRAME`)가 없는 창은 크기 조절 불가로 보고 xdg min=max를 현재 크기로 고정한다.
+  FL처럼 테두리 없이 크기 조절을 직접 처리하는 앱의 메인 창도 여기에 걸린다.
+- Wine은 창을 갱신할 때마다 `set_min_size`/`set_max_size`를 보내고, 상태를 갱신할 때마다(`wayland_surface_update_state_toplevel`)
+  고정을 (0,0)으로 풀었다가 다시 건다. niri는 이 요청마다 configure로 답해서 루프가 된다 (한 창에 수천 번).
+
+**수정** (`dlls/winewayland.drv/window.c`, `wayland_surface.c`, `waylanddrv.h`)
+- `WS_MAXIMIZEBOX`가 있는 창은 크기 조절 가능으로 본다 (최대화할 수 있는 창이면 크기도 바꿀 수 있다).
+- 마지막으로 보낸 크기 제한을 기억해 두고(`size_limit_width/height`), 값이 바뀔 때만 보낸다.
+- 상태 갱신 때의 제한 해제는 실제로 최대화/전체화면/최소화 요청을 보낼 때만 한다.
+
+**확인**: `WAYLAND_DEBUG=client`에서 창마다 `set_min_size`/`set_max_size`가 처음 한 번씩만 나오고, 같은 값이 반복되지 않는다.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.
