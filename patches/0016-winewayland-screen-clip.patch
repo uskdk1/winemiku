@@ -1,0 +1,27 @@
+diff --git a/dlls/winewayland.drv/wayland_pointer.c b/dlls/winewayland.drv/wayland_pointer.c
+index 35c069a..0dcaa9b 100644
+--- a/dlls/winewayland.drv/wayland_pointer.c
++++ b/dlls/winewayland.drv/wayland_pointer.c
+@@ -1063,6 +1063,22 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset)
+ 
+     TRACE("clip=%s reset=%d\n", wine_dbgstr_rect(clip), reset);
+ 
++    /* A clip covering the whole virtual screen doesn't restrict anything, but
++     * here it would confine the pointer to the foreground window's surface
++     * (apps like FL Studio clip to the screen all the time), leaving the cursor
++     * position wrong over their other windows. With a hidden cursor it still
++     * means a pointer lock (relative mouse look in fullscreen games). */
++    if (clip && (pointer->cursor.wl_surface || pointer->wp_cursor_shape_device_v1))
++    {
++        RECT screen = NtUserGetVirtualScreenRect(MDT_RAW_DPI);
++        if (clip->left <= screen.left && clip->top <= screen.top &&
++            clip->right >= screen.right && clip->bottom >= screen.bottom)
++        {
++            TRACE("clip covers the virtual screen %s, not confining\n", wine_dbgstr_rect(&screen));
++            clip = NULL;
++        }
++    }
++
+     NtUserGetCursorPos(&cursor_pos);
+     hwnd = NtUserGetForegroundWindow();
+ 

@@ -290,6 +290,21 @@ Windows에서는 크기가 0이라 안 보이지만, Wine은 이를 xdg_toplevel
 
 ---
 
+## 0016 winewayland-screen-clip
+
+**문제**: FL Studio의 Welcome 창 같은 팝업에서 클릭이 안 먹는다 (간헐적, 한참 뒤에 먹기도 한다).
+
+**원인**: FL은 `ClipCursor`를 화면 전체((0,0)-(1920,1080))로 계속 호출한다. Windows에서는 아무것도 가두지 않는 셈이지만,
+winewayland는 클립이 있으면 포그라운드 창 surface에 `zwp_confined_pointer`를 건다. 그래서 포그라운드가 아닌 창 위에서는
+커서 위치가 틀어져(`WM_LBUTTONDOWN`의 화면 좌표 x가 계속 0) 앱이 엉뚱한 곳을 누른 것으로 본다.
+
+**수정** (`dlls/winewayland.drv/wayland_pointer.c`, `WAYLAND_ClipCursor`): 커서가 보일 때 가상 화면 전체를 덮는 클립은
+클립 없음으로 다룬다. 커서를 숨긴 클립은 그대로 포인터 잠금이다 (전체화면 게임의 마우스 시점).
+
+**확인**: `WAYLAND_DEBUG=client`에 `confine_pointer`가 없고, `WINEDEBUG=+win`의 `window_from_point`가 클릭한 위치를 가리킨다.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.
