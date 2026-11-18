@@ -289,9 +289,9 @@ Windows에서는 크기가 0이라 안 보이지만, Wine은 이를 xdg_toplevel
 
 **수정** (`dlls/winewayland.drv/window.c`)
 - `wayland_win_data_create_wayland_surface`: 창 크기가 비어 있으면 역할 없음(화면에 안 나옴).
-- `WAYLAND_WindowPosChanged`: 빈 창은 관리 창이 아니다. owner가 화면에 없으면(역할 없음, 예: TApplication이 owner인 Delphi 폼)
+  win32u는 0×0 창에도 128×128 창 표면을 만들어 주므로, 이게 없으면 toplevel이 된다.
+- `WAYLAND_WindowPosChanged`: owner가 화면에 없으면(역할 없음, 예: TApplication이 owner인 Delphi 폼)
   거기에 subsurface로 붙이지 않고 toplevel로 띄운다 (붙이면 안 보인다).
-- `is_window_managed`: `WS_POPUP | WS_EX_NOACTIVATE` 창은 활성화하며 띄워도 관리 창이 아니다 (0003의 검사를 활성화 검사보다 앞으로).
 
 **확인**: `WAYLAND_DEBUG=client`에서 `set_title("")`인 toplevel은 시작 스플래시 하나뿐이다.
 

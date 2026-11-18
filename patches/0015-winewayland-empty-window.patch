@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
-index dc7bbec..bec5d05 100644
+index dc7bbec..b910809 100644
 --- a/dlls/winewayland.drv/window.c
 +++ b/dlls/winewayland.drv/window.c
 @@ -199,7 +199,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
@@ -13,41 +13,7 @@ index dc7bbec..bec5d05 100644
      /* the first popup shown right after a tray icon click (the tray menu) is
       * placed where the tray was clicked, as a layer surface */
      else if (data->wayland_surface && data->wayland_surface->role == WAYLAND_SURFACE_ROLE_LAYER &&
-@@ -416,13 +418,16 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
-     /* child windows are not managed */
-     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
-     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
--    /* activated windows are managed */
--    if (!(swp_flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW))) return TRUE;
-     /* non-activatable popups (menus, tooltips) are not managed: an xdg_toplevel
-      * always takes keyboard focus on Wayland, which activates the popup and makes
--     * apps close it immediately (e.g. Qt frameless menus keep WS_CAPTION) */
-+     * apps close it immediately (e.g. Qt frameless menus keep WS_CAPTION).
-+     * Checked before the activation flags: a hidden helper window like Delphi's
-+     * zero-sized TApplication window is shown "activated", and as a toplevel the
-+     * compositor would give it a size (an empty, transparent window). */
-     ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
-     if ((style & WS_POPUP) && (ex_style & WS_EX_NOACTIVATE)) return FALSE;
-+    /* activated windows are managed */
-+    if (!(swp_flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW))) return TRUE;
-     if (hwnd == get_active_window()) return TRUE;
-     /* windows with caption are managed */
-     if ((style & WS_CAPTION) == WS_CAPTION) return TRUE;
-@@ -492,15 +497,22 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
-     managed = is_window_managed(hwnd, swp_flags, fullscreen);
- 
-     if (!(data = wayland_win_data_get(hwnd))) return;
-+    /* An empty window has nothing to show: as an xdg_toplevel the compositor
-+     * would size it (e.g. Delphi's TApplication window, shown at 0x0 with a
-+     * caption style, became a large transparent window). */
-+    if (IsRectEmpty(&new_rects->window)) managed = FALSE;
-     /* Like winex11, a shown window stays managed until it's hidden (the
-      * server already cleared WS_VISIBLE for SWP_HIDEWINDOW): a captionless
-      * popup is only managed while active, and losing activation (e.g. a
-      * click on its owner) would turn its xdg_toplevel into a subsurface and
-      * back on the next activation, which the compositor places anew each time. */
--    if (!managed && (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE)) managed = data->managed;
-+    else if (!managed && (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE)) managed = data->managed;
+@@ -501,6 +503,9 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
      if (!managed && surface) owner = owner_hint;
      owner_data = owner && owner != hwnd ? wayland_win_data_get(owner) : NULL;
      owner_surface = owner_data ? owner_data->wayland_surface : NULL;
