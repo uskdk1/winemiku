@@ -18,7 +18,7 @@
 | [0009](#0009-winewayland-maximize-work-area) | winewayland.drv | 작업 영역(바 제외)을 최대화 크기에서 배우고, 최대화·복원을 Windows처럼 |
 | [0010](#0010-winewayland-unfullscreen-size) | winewayland.drv | 컴포지터가 전체화면을 풀면 창을 이전 크기로 |
 | [0011](#0011-winewayland-subsurface-reparent) | winewayland.drv | owner surface가 새로 만들어지면 subsurface를 다시 붙이기 (FL Studio 즉시 종료) |
-| [0012](#0012-borderless-maximized-not-fullscreen) | winewayland.drv, win32u | 테두리 없는 최대화(버튼) 창은 전체화면 대신 최대화, 커서 안 가둠 |
+| [0012](#0012-borderless-maximized-not-fullscreen) | winewayland.drv | 테두리 없는 최대화(버튼) 창은 전체화면 대신 최대화 |
 | [0013](#0013-winewayland-size-limits) | winewayland.drv | 최대화 버튼 창은 크기 조절 가능, xdg 크기 제한은 바뀔 때만 보내기 |
 | [0014](#0014-winewayland-keep-managed) | winewayland.drv | 보이는 동안 관리 창은 관리 창으로 유지 (팝업 순간이동) |
 | [0015](#0015-winewayland-empty-window) | winewayland.drv | 크기 0인 창(Delphi `TApplication`)은 화면에 안 띄우기 |
@@ -228,7 +228,8 @@ surface 주소는 재사용될 수 있어서(실제로 같은 주소로 다시 �
 (최대화 상태로 뜰 때도, 최대화 표시 없이 크기만 맞출 때도 있다). 그런데 Wine은 첫 최대화 전까지 작업 영역을 모르니(0009)
 모니터 전체를 작업 영역으로 보고, 그래서 FL 창이 모니터 크기가 된다. 이렇게 모니터를 덮는 창을 두고
 winewayland는 제목줄이 있을 때만 최대화로 보고 나머지는 xdg 전체화면으로 보낸다(`wayland_win_data_get_config`).
-win32u도 같은 기준으로 커서를 모니터 안에 가둔다(`clip_fullscreen_window`). 게다가 굵은 테두리가 없으니 min=max=모니터 크기로 고정되어
+win32u도 같은 기준으로 커서를 모니터 안에 가둔다(`clip_fullscreen_window`, 모니터가 하나일 때만. 커서가 보이면 0016이 이 클립을 버린다).
+게다가 굵은 테두리가 없으니 min=max=모니터 크기로 고정되어
 컴포지터가 최대화 크기로 줄일 수도 없다.
 
 **수정**
@@ -237,7 +238,6 @@ win32u도 같은 기준으로 커서를 모니터 안에 가둔다(`clip_fullscr
   컴포지터가 최대화 크기를 주면 0009가 작업 영역을 배우고 창을 그 크기로 맞춘다.
 - `WAYLAND_WindowPosChanged`: 최대화 창과, 모니터를 덮는 최대화 버튼 있는 창은 크기 고정(min=max)에서 뺀다
   (0013에서 최대화 버튼 있는 창 전체로 넓혔다).
-- `clip_fullscreen_window` (`dlls/win32u/input.c`): 최대화 창(제목줄 무관)과 제목줄 없이 최대화 버튼이 있는 창은 커서를 가두지 않는다.
 
 **확인**: `WAYLAND_DEBUG=client`에 `set_fullscreen`이 없고 `set_maximized` → `wayland_learn_work_area ... maximized size 1920x1045`.
 FL 메인 창이 바 아래 영역(1920×1045)에 맞고, 마우스가 밖으로 나간다.
@@ -307,6 +307,8 @@ winewayland는 클립이 있으면 포그라운드 창 surface에 `zwp_confined_
 
 **수정** (`dlls/winewayland.drv/wayland_pointer.c`, `WAYLAND_ClipCursor`): 커서가 보일 때 가상 화면 전체를 덮는 클립은
 클립 없음으로 다룬다. 커서를 숨긴 클립은 그대로 포인터 잠금이다 (전체화면 게임의 마우스 시점).
+win32u가 모니터를 덮는 창에 거는 전체화면 클립(`clip_fullscreen_window`, 모니터가 하나일 때만 걸고 그 영역은 가상 화면 전체)도
+여기에 해당한다. 그래서 0012는 win32u를 고치지 않는다.
 
 **확인**: `WAYLAND_DEBUG=client`에 `confine_pointer`가 없고, `WINEDEBUG=+win`의 `window_from_point`가 클릭한 위치를 가리킨다.
 `WINEDEBUG=+cursor`에서 `covers the virtual screen, not confining`. 모니터가 여럿이면 가상 화면 전체를 덮는 클립만 해당한다.
