@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
-index e90be0a..d0566eb 100644
+index 0c7bf9a..c76e9e4 100644
 --- a/dlls/winewayland.drv/wayland_surface.c
 +++ b/dlls/winewayland.drv/wayland_surface.c
 @@ -458,6 +458,8 @@ static const struct wp_fractional_scale_v1_listener wp_fractional_scale_listener
@@ -36,7 +36,7 @@ index e90be0a..d0566eb 100644
  
      /* Present contents independently of the owner surface. */
      wl_subsurface_set_desync(surface->wl_subsurface);
-@@ -886,6 +890,7 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
+@@ -885,6 +889,7 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
          }
  
          surface->owner_hwnd = NULL;
@@ -44,7 +44,7 @@ index e90be0a..d0566eb 100644
          break;
  
      case WAYLAND_SURFACE_ROLE_LAYER:
-@@ -1202,6 +1207,20 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
+@@ -1201,6 +1206,20 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
      {
          RECT rect = surface->window.rect;
  

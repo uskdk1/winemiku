@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
-index d0566eb..7cfa587 100644
+index c76e9e4..604c7a3 100644
 --- a/dlls/winewayland.drv/wayland_surface.c
 +++ b/dlls/winewayland.drv/wayland_surface.c
 @@ -627,6 +627,7 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
@@ -10,7 +10,7 @@ index d0566eb..7cfa587 100644
      if (!surface->xdg_toplevel) goto err;
      xdg_toplevel_add_listener(surface->xdg_toplevel, &xdg_toplevel_listener, surface->hwnd);
  
-@@ -1085,18 +1086,21 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
+@@ -1084,18 +1085,21 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
      if (!IsRectEmpty(&rect))
      {
          int width = rect.right - rect.left, height = rect.bottom - rect.top;

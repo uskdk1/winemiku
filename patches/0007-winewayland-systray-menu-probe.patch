@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/wayland_pointer.c b/dlls/winewayland.drv/wayland_pointer.c
-index 8812cd5..35c069a 100644
+index 8812cd5..cf7db0a 100644
 --- a/dlls/winewayland.drv/wayland_pointer.c
 +++ b/dlls/winewayland.drv/wayland_pointer.c
 @@ -128,7 +128,7 @@ static BOOL wayland_pointer_on_catcher(void)
@@ -11,24 +11,38 @@ index 8812cd5..35c069a 100644
      pthread_mutex_unlock(&pointer->mutex);
  
      return ret;
-@@ -232,10 +232,15 @@ static void pointer_handle_enter(void *data, struct wl_pointer *wl_pointer,
+@@ -219,6 +219,7 @@ static void pointer_handle_enter(void *data, struct wl_pointer *wl_pointer,
+                                  wl_fixed_t sx, wl_fixed_t sy)
+ {
+     struct wayland_pointer *pointer = &process_wayland.pointer;
++    BOOL catcher;
+     HWND hwnd;
+ 
+     InterlockedExchange(&process_wayland.input_serial, serial);
+@@ -227,15 +228,21 @@ static void pointer_handle_enter(void *data, struct wl_pointer *wl_pointer,
+     /* The wl_surface user data remains valid and immutable for the whole
+      * lifetime of the object, so it's safe to access without locking. */
+     hwnd = wl_surface_get_user_data(wl_surface);
++    catcher = wayland_surface_is_catcher(wl_surface);
+ 
+     TRACE("hwnd=%p\n", hwnd);
  
      pthread_mutex_lock(&pointer->mutex);
      pointer->focused_hwnd = hwnd;
 -    pointer->focused_catcher = wayland_surface_is_catcher(wl_surface);
-+    pointer->focused_catcher = wayland_surface_is_catcher(wl_surface) ? wl_surface : NULL;
++    pointer->focused_catcher = catcher ? wl_surface : NULL;
      pointer->enter_serial = serial;
      pthread_mutex_unlock(&pointer->mutex);
  
 +    /* a tray menu whose position the bar didn't tell us opens where the
 +     * pointer is (still over the clicked tray icon) */
-+    if (wayland_surface_is_catcher(wl_surface))
++    if (catcher)
 +        wayland_surface_catcher_enter(hwnd, wl_surface, wl_fixed_to_double(sx), wl_fixed_to_double(sy));
 +
      /* The cursor is undefined at every enter, so we set it again with
       * the latest information we have. */
      wayland_set_cursor(hwnd, NULL, FALSE);
-@@ -259,7 +264,7 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
+@@ -259,7 +266,7 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
  
      pthread_mutex_lock(&pointer->mutex);
      pointer->focused_hwnd = NULL;
@@ -38,7 +52,7 @@ index 8812cd5..35c069a 100644
      pthread_mutex_unlock(&pointer->mutex);
  }
 diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
-index f3fec13..e90be0a 100644
+index f3fec13..0c7bf9a 100644
 --- a/dlls/winewayland.drv/wayland_surface.c
 +++ b/dlls/winewayland.drv/wayland_surface.c
 @@ -205,32 +205,59 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener =
@@ -233,10 +247,10 @@ index f3fec13..e90be0a 100644
  }
  
  static void xdg_toplevel_handle_configure(void *private,
-@@ -643,17 +699,58 @@ err:
-  * must appear next to the bar on Wayland where clients can't position
-  * their toplevels.
-  */
+@@ -635,6 +691,40 @@ err:
+     ERR("Failed to assign subsurface role to wayland surface\n");
+ }
+ 
 +/* Creates the menu's layer surface on the output, to open at pos (output-local). */
 +static void layer_surface_create(struct wayland_surface *surface, struct wl_output *wl_output,
 +                                 const RECT *output_rect, POINT pos)
@@ -271,8 +285,10 @@ index f3fec13..e90be0a 100644
 +    /* the initial commit needs a size, done in wayland_surface_reconfigure_layer */
 +}
 +
- void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
- {
+ /**********************************************************************
+  *          wayland_surface_make_layer
+  *
+@@ -648,12 +738,19 @@ void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
      struct wayland_output *output;
      struct wl_output *wl_output = NULL;
      RECT output_rect = {0};
@@ -305,7 +321,7 @@ index f3fec13..e90be0a 100644
          inside = pos.x >= rect.left && pos.x < rect.right && pos.y >= rect.top && pos.y < rect.bottom;
          /* the output that was clicked, or else the first one */
          if (!wl_output || inside)
-@@ -675,39 +777,58 @@ void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
+@@ -675,39 +777,57 @@ void wayland_surface_make_layer(struct wayland_surface *surface, POINT pos)
      }
      pthread_mutex_unlock(&process_wayland.output_mutex);
  
@@ -339,11 +355,10 @@ index f3fec13..e90be0a 100644
 +    if (probe) WARN("surface=%p cannot probe for the tray menu position\n", surface);
  
 -    create_catcher(surface, wl_output);
-+    layer_surface_create(surface, wl_output, &output_rect, pos);
-+    if (!surface->layer_surface) return;
 +    pos.x -= output_rect.left;
 +    pos.y -= output_rect.top;
-+    surface->layer_pos = pos;
++    layer_surface_create(surface, wl_output, &output_rect, pos);
++    if (!surface->layer_surface) return;
 +    create_catcher(surface, wl_output, &output_rect, FALSE);
 +}
  
@@ -390,7 +405,7 @@ index f3fec13..e90be0a 100644
  }
  
  /**********************************************************************
-@@ -768,12 +889,13 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
+@@ -768,12 +888,13 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
          break;
  
      case WAYLAND_SURFACE_ROLE_LAYER:
@@ -405,7 +420,7 @@ index f3fec13..e90be0a 100644
          surface->layer_committed = FALSE;
          break;
      }
-@@ -1174,6 +1296,7 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
+@@ -1174,6 +1295,7 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
          wayland_surface_reconfigure_subsurface(surface);
          break;
      case WAYLAND_SURFACE_ROLE_LAYER:
