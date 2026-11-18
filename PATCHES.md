@@ -193,6 +193,26 @@ Wine은 창을 컴포지터 크기로 줄이고, 앱은 다시 작업 영역 크
 
 ---
 
+## 0011 winewayland-subsurface-reparent
+
+**문제**: FL Studio 2026이 시작하자마자 꺼진다 (창이 잠깐 보이거나 아무것도 안 뜬다).
+`WAYLAND_DEBUG=client`에 `wl_subsurface#N: error 0: Provided surface is not a sibling or parent.`,
+Wine 로그에 `wayland_read_events_thread Failed to read events from the compositor, terminating process`.
+
+**원인**: 소유자(owner)가 있는 창은 owner의 wl_surface에 붙은 `wl_subsurface`가 된다. owner 창의 역할이 바뀌면
+(예: toplevel → subsurface) Wine은 owner의 wayland surface를 **새로 만드는데**, 자식 쪽은 owner **hwnd**만 비교해서
+"이미 붙어 있음"으로 넘어간다. 그래서 자식은 파괴된 옛 surface에 붙은 채로 남고, 다음 그리기 때 새 owner surface를 기준으로
+`place_above`를 보내 프로토콜 에러가 나며 컴포지터가 연결을 끊는다 (FL의 스플래시 창이 그 자식이었다).
+surface 주소는 재사용될 수 있어서(실제로 같은 주소로 다시 할당됐다) 포인터 비교로는 알 수 없다.
+
+**수정** (`dlls/winewayland.drv/wayland_surface.c`, `waylanddrv.h`): wayland surface마다 고유 `id`를 주고, subsurface가
+붙을 때 owner의 id를 기억한다(`owner_id`). `wayland_surface_make_subsurface`는 hwnd와 id가 모두 같을 때만 건너뛰고,
+`wayland_surface_reconfigure_subsurface`는 owner의 id가 바뀌었으면 새 owner surface에 다시 붙인 뒤 배치한다.
+
+**확인**: `WINEDEBUG=+waylanddrv`에서 `reattaching to new owner surface`, 프로토콜 에러 없이 FL Studio 메인 창이 뜬다.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.

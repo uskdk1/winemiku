@@ -1,0 +1,88 @@
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index 90fbf10..a5739db 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -458,6 +458,8 @@ static const struct wp_fractional_scale_v1_listener wp_fractional_scale_listener
+     wp_fractional_scale_handle_scale
+ };
+ 
++static UINT next_surface_id;
++
+ /**********************************************************************
+  *          wayland_surface_create
+  *
+@@ -477,6 +479,7 @@ struct wayland_surface *wayland_surface_create(HWND hwnd)
+     TRACE("surface=%p\n", surface);
+ 
+     surface->hwnd = hwnd;
++    surface->id = __atomic_add_fetch(&next_surface_id, 1, __ATOMIC_RELAXED);
+     surface->wl_surface = wl_compositor_create_surface(process_wayland.wl_compositor);
+     if (!surface->wl_surface)
+     {
+@@ -657,7 +660,8 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
+                                      struct wayland_surface *owner)
+ {
+     assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE);
+-    if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd) return;
++    if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd &&
++        surface->owner_id == owner->id) return;
+ 
+     wayland_surface_clear_role(surface);
+     surface->role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
+@@ -678,6 +682,7 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
+ 
+     surface->role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
+     surface->owner_hwnd = owner->hwnd;
++    surface->owner_id = owner->id;
+ 
+     /* Present contents independently of the owner surface. */
+     wl_subsurface_set_desync(surface->wl_subsurface);
+@@ -886,6 +891,7 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
+         }
+ 
+         surface->owner_hwnd = NULL;
++        surface->owner_id = 0;
+         break;
+ 
+     case WAYLAND_SURFACE_ROLE_LAYER:
+@@ -1202,6 +1208,20 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
+     {
+         RECT rect = surface->window.rect;
+ 
++        /* The owner's wayland surface was recreated (e.g. on a role change), destroying
++         * the parent of our wl_subsurface: reattach to the new one, place_above with a
++         * surface that is neither sibling nor parent is a fatal protocol error. */
++        if (surface->owner_id != owner_surface->id)
++        {
++            TRACE("hwnd=%p reattaching to new owner surface %p\n", surface->hwnd, owner_surface);
++            wayland_surface_make_subsurface(surface, owner_surface);
++            if (!surface->wl_subsurface)
++            {
++                wayland_win_data_release(owner_data);
++                return;
++            }
++        }
++
+         OffsetRect(&rect, -owner_surface->window.rect.left, -owner_surface->window.rect.top);
+         rect = map_rect_to_surface(surface, rect);
+ 
+diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
+index 06886d6..a742386 100644
+--- a/dlls/winewayland.drv/waylanddrv.h
++++ b/dlls/winewayland.drv/waylanddrv.h
+@@ -284,6 +284,7 @@ struct wayland_shm_buffer
+ struct wayland_surface
+ {
+     HWND hwnd;
++    UINT id; /* unique per wayland_surface, unlike its (reused) address */
+ 
+     struct wl_surface *wl_surface;
+     struct wp_viewport *wp_viewport;
+@@ -305,6 +306,7 @@ struct wayland_surface
+         {
+             struct wl_subsurface *wl_subsurface;
+             HWND owner_hwnd;
++            UINT owner_id; /* id of the owner surface the subsurface is attached to */
+         };
+         struct
+         {
