@@ -1,27 +1,63 @@
 diff --git a/dlls/winewayland.drv/wayland_pointer.c b/dlls/winewayland.drv/wayland_pointer.c
-index 35c069a..0dcaa9b 100644
+index 35c069a..88bd44d 100644
 --- a/dlls/winewayland.drv/wayland_pointer.c
 +++ b/dlls/winewayland.drv/wayland_pointer.c
-@@ -1063,6 +1063,22 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset)
+@@ -896,6 +896,13 @@ static void wayland_surface_calc_confine(struct wayland_surface *surface,
+     *confine = map_rect_to_surface(surface, window_clip);
+ }
+ 
++/* pointer->mutex must be held */
++static BOOL wayland_pointer_cursor_is_visible(void)
++{
++    struct wayland_pointer *pointer = &process_wayland.pointer;
++    return pointer->cursor.wl_surface || pointer->wp_cursor_shape_device_v1;
++}
++
+ /***********************************************************************
+  *           wayland_pointer_update_constraint
+  *
+@@ -916,7 +923,7 @@ static void wayland_pointer_update_constraint(struct wl_surface *wl_surface,
+         return;
+     }
+ 
+-    is_visible = pointer->cursor.wl_surface || pointer->wp_cursor_shape_device_v1;
++    is_visible = wayland_pointer_cursor_is_visible();
+     needs_lock = wl_surface &&
+                  ((confine_rect && !is_visible) || force_lock) &&
+                  pointer->wl_pointer;
+@@ -1060,9 +1067,17 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset)
+     struct wayland_win_data *data;
+     RECT confine_rect;
+     POINT cursor_pos, warp;
++    BOOL covers_screen = FALSE;
  
      TRACE("clip=%s reset=%d\n", wine_dbgstr_rect(clip), reset);
+ 
++    if (clip)
++    {
++        RECT screen = NtUserGetVirtualScreenRect(MDT_RAW_DPI);
++        covers_screen = clip->left <= screen.left && clip->top <= screen.top &&
++                        clip->right >= screen.right && clip->bottom >= screen.bottom;
++    }
++
+     NtUserGetCursorPos(&cursor_pos);
+     hwnd = NtUserGetForegroundWindow();
+ 
+@@ -1115,6 +1130,17 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset)
+         pthread_mutex_lock(&pointer->mutex);
+     }
  
 +    /* A clip covering the whole virtual screen doesn't restrict anything, but
 +     * here it would confine the pointer to the foreground window's surface
 +     * (apps like FL Studio clip to the screen all the time), leaving the cursor
 +     * position wrong over their other windows. With a hidden cursor it still
 +     * means a pointer lock (relative mouse look in fullscreen games). */
-+    if (clip && (pointer->cursor.wl_surface || pointer->wp_cursor_shape_device_v1))
++    if (covers_screen && wayland_pointer_cursor_is_visible())
 +    {
-+        RECT screen = NtUserGetVirtualScreenRect(MDT_RAW_DPI);
-+        if (clip->left <= screen.left && clip->top <= screen.top &&
-+            clip->right >= screen.right && clip->bottom >= screen.bottom)
-+        {
-+            TRACE("clip covers the virtual screen %s, not confining\n", wine_dbgstr_rect(&screen));
-+            clip = NULL;
-+        }
++        TRACE("clip %s covers the virtual screen, not confining\n", wine_dbgstr_rect(clip));
++        clip = NULL;
 +    }
 +
-     NtUserGetCursorPos(&cursor_pos);
-     hwnd = NtUserGetForegroundWindow();
- 
+    /* Since we are running in the context of the foreground thread we know
+     * that the wl_surface of the foreground HWND will not be invalidated,
+     * so we can access it without having the win data lock. */

@@ -17,6 +17,12 @@
 | [0008](#0008-win32u-placement-unset-pos) | win32u | `SetWindowPlacement`의 (-1,-1) 위치는 "지정 안 함" |
 | [0009](#0009-winewayland-maximize-work-area) | winewayland.drv | 작업 영역(바 제외)을 최대화 크기에서 배우고, 최대화·복원을 Windows처럼 |
 | [0010](#0010-winewayland-unfullscreen-size) | winewayland.drv | 컴포지터가 전체화면을 풀면 창을 이전 크기로 |
+| [0011](#0011-winewayland-subsurface-reparent) | winewayland.drv | owner surface가 새로 만들어지면 subsurface를 다시 붙이기 (FL Studio 즉시 종료) |
+| [0012](#0012-borderless-maximized-not-fullscreen) | winewayland.drv, win32u | 테두리 없는 최대화(버튼) 창은 전체화면 대신 최대화, 커서 안 가둠 |
+| [0013](#0013-winewayland-size-limits) | winewayland.drv | 최대화 버튼 창은 크기 조절 가능, xdg 크기 제한은 바뀔 때만 보내기 |
+| [0014](#0014-winewayland-keep-managed) | winewayland.drv | 보이는 동안 관리 창은 관리 창으로 유지 (팝업 순간이동) |
+| [0015](#0015-winewayland-empty-window) | winewayland.drv | 크기 0인 창(Delphi `TApplication`)은 화면에 안 띄우기 |
+| [0016](#0016-winewayland-screen-clip) | winewayland.drv | 화면 전체를 덮는 `ClipCursor`는 가두지 않기 |
 | [dxvk 0001](#dxvk-0001-d3d11-auto-generate-mips) | DXVK d3d11 | 큰 이미지를 작게 그릴 때 숨은 mipmap |
 
 ---
@@ -229,7 +235,8 @@ win32u도 같은 기준으로 커서를 모니터 안에 가둔다(`clip_fullscr
 - `wayland_win_data_get_config` (`dlls/winewayland.drv/window.c`): 모니터를 덮는 창이 `WS_MAXIMIZE`이거나, 제목줄이 없고 `WS_MAXIMIZEBOX`가 있으면
   전체화면이 아니라 **최대화**로 보낸다. 게임의 전체화면 창(SDL 등)은 최대화 버튼을 켜지 않는다.
   컴포지터가 최대화 크기를 주면 0009가 작업 영역을 배우고 창을 그 크기로 맞춘다.
-- `WAYLAND_WindowPosChanged`: 최대화 창과, 모니터를 덮는 최대화 버튼 있는 창은 크기 고정(min=max)에서 뺀다.
+- `WAYLAND_WindowPosChanged`: 최대화 창과, 모니터를 덮는 최대화 버튼 있는 창은 크기 고정(min=max)에서 뺀다
+  (0013에서 최대화 버튼 있는 창 전체로 넓혔다).
 - `clip_fullscreen_window` (`dlls/win32u/input.c`): 최대화 창(제목줄 무관)과 제목줄 없이 최대화 버튼이 있는 창은 커서를 가두지 않는다.
 
 **확인**: `WAYLAND_DEBUG=client`에 `set_fullscreen`이 없고 `set_maximized` → `wayland_learn_work_area ... maximized size 1920x1045`.
@@ -302,6 +309,7 @@ winewayland는 클립이 있으면 포그라운드 창 surface에 `zwp_confined_
 클립 없음으로 다룬다. 커서를 숨긴 클립은 그대로 포인터 잠금이다 (전체화면 게임의 마우스 시점).
 
 **확인**: `WAYLAND_DEBUG=client`에 `confine_pointer`가 없고, `WINEDEBUG=+win`의 `window_from_point`가 클릭한 위치를 가리킨다.
+`WINEDEBUG=+cursor`에서 `covers the virtual screen, not confining`. 모니터가 여럿이면 가상 화면 전체를 덮는 클립만 해당한다.
 
 ---
 

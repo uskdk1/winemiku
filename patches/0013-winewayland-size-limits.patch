@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
-index a5739db..d6f8259 100644
+index d0566eb..7cfa587 100644
 --- a/dlls/winewayland.drv/wayland_surface.c
 +++ b/dlls/winewayland.drv/wayland_surface.c
 @@ -627,6 +627,7 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
@@ -10,7 +10,13 @@ index a5739db..d6f8259 100644
      if (!surface->xdg_toplevel) goto err;
      xdg_toplevel_add_listener(surface->xdg_toplevel, &xdg_toplevel_listener, surface->hwnd);
  
-@@ -1089,15 +1090,17 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
+@@ -1085,18 +1086,21 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
+     if (!IsRectEmpty(&rect))
+     {
+         int width = rect.right - rect.left, height = rect.bottom - rect.top;
++        int limit_width = surface->window.resizeable ? 0 : width;
++        int limit_height = surface->window.resizeable ? 0 : height;
++
          xdg_surface_set_window_geometry(surface->xdg_surface,
                                          rect.left, rect.top,
                                          width, height);
@@ -20,8 +26,6 @@ index a5739db..d6f8259 100644
 -            xdg_toplevel_set_max_size(surface->xdg_toplevel, 0, 0);
 -        }
 -        else
-+        int limit_width = surface->window.resizeable ? 0 : width;
-+        int limit_height = surface->window.resizeable ? 0 : height;
 +
 +        /* Only send changes: some compositors (niri) answer every min/max size
 +         * request with a configure, which comes back here and loops. */
@@ -37,7 +41,7 @@ index a5739db..d6f8259 100644
      }
  }
 diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
-index a742386..b8efa30 100644
+index 2967a42..cc0da78 100644
 --- a/dlls/winewayland.drv/waylanddrv.h
 +++ b/dlls/winewayland.drv/waylanddrv.h
 @@ -301,6 +301,7 @@ struct wayland_surface
@@ -49,7 +53,7 @@ index a742386..b8efa30 100644
          struct
          {
 diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
-index 8ea517b..d0b68f5 100644
+index c459894..4447e73 100644
 --- a/dlls/winewayland.drv/window.c
 +++ b/dlls/winewayland.drv/window.c
 @@ -277,8 +277,20 @@ static void wayland_surface_update_state_toplevel(struct wayland_surface *surfac
@@ -75,18 +79,18 @@ index 8ea517b..d0b68f5 100644
  
           /* First do all state unsettings, before setting new state. Some
            * Wayland compositors misbehave if the order is reversed. */
-@@ -491,10 +503,11 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+@@ -491,9 +503,11 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
       * the current size, which the compositor then can't maximize or resize
       * (and some compositors answer every min/max change with a configure,
       * which loops). Maximized windows too: they follow the compositor's
 -     * maximized size (the work area), not the monitor. */
+-    data->resizeable = (NtUserGetWindowLongW(hwnd, GWL_STYLE) & (WS_THICKFRAME | WS_MAXIMIZE)) ||
+-                       (fullscreen && (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_MAXIMIZEBOX));
 +     * maximized size (the work area), not the monitor. And windows with a maximize
 +     * box: borderless apps (FL Studio) do their own sizing border, and a window
 +     * that can be maximized is meant to be resized. */
-     data->resizeable = (swp_flags & WINE_SWP_RESIZABLE) ||
--                       (NtUserGetWindowLongW(hwnd, GWL_STYLE) & (WS_THICKFRAME | WS_MAXIMIZE)) ||
--                       (fullscreen && (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_MAXIMIZEBOX));
-+                       (NtUserGetWindowLongW(hwnd, GWL_STYLE) & (WS_THICKFRAME | WS_MAXIMIZE | WS_MAXIMIZEBOX));
++    data->resizeable = !!(NtUserGetWindowLongW(hwnd, GWL_STYLE) &
++                          (WS_THICKFRAME | WS_MAXIMIZE | WS_MAXIMIZEBOX));
      data->managed = managed;
  
      if (!surface)

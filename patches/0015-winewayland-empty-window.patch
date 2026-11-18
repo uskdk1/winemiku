@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
-index ba6c870..18063e9 100644
+index dc7bbec..bec5d05 100644
 --- a/dlls/winewayland.drv/window.c
 +++ b/dlls/winewayland.drv/window.c
 @@ -199,7 +199,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
@@ -33,26 +33,22 @@ index ba6c870..18063e9 100644
      if (hwnd == get_active_window()) return TRUE;
      /* windows with caption are managed */
      if ((style & WS_CAPTION) == WS_CAPTION) return TRUE;
-@@ -490,12 +495,16 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
-      * may need to query win_data information about other HWNDs and thus
-      * acquire the lock itself internally. */
+@@ -492,15 +497,22 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
      managed = is_window_managed(hwnd, swp_flags, fullscreen);
+ 
+     if (!(data = wayland_win_data_get(hwnd))) return;
 +    /* An empty window has nothing to show: as an xdg_toplevel the compositor
 +     * would size it (e.g. Delphi's TApplication window, shown at 0x0 with a
 +     * caption style, became a large transparent window). */
 +    if (IsRectEmpty(&new_rects->window)) managed = FALSE;
-     /* Like winex11, a shown window stays managed until it's hidden: a
-      * captionless popup is only managed while active, and losing activation
-      * (e.g. a click on its owner) would turn its xdg_toplevel into a
-      * subsurface and back on the next activation, which the compositor
-      * places anew each time. */
--    if (!managed && !(swp_flags & SWP_HIDEWINDOW) &&
-+    else if (!managed && !(swp_flags & SWP_HIDEWINDOW) &&
-         (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE) &&
-         (data = wayland_win_data_get(hwnd)))
-     {
-@@ -507,6 +516,9 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
-     if (!(data = wayland_win_data_get(hwnd))) return;
+     /* Like winex11, a shown window stays managed until it's hidden (the
+      * server already cleared WS_VISIBLE for SWP_HIDEWINDOW): a captionless
+      * popup is only managed while active, and losing activation (e.g. a
+      * click on its owner) would turn its xdg_toplevel into a subsurface and
+      * back on the next activation, which the compositor places anew each time. */
+-    if (!managed && (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE)) managed = data->managed;
++    else if (!managed && (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE)) managed = data->managed;
+     if (!managed && surface) owner = owner_hint;
      owner_data = owner && owner != hwnd ? wayland_win_data_get(owner) : NULL;
      owner_surface = owner_data ? owner_data->wayland_surface : NULL;
 +    /* an owner that isn't on screen (no role, e.g. the empty TApplication window

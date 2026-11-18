@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
-index 8dc333b..06886d6 100644
+index 103665e..24d3bf2 100644
 --- a/dlls/winewayland.drv/waylanddrv.h
 +++ b/dlls/winewayland.drv/waylanddrv.h
 @@ -290,6 +290,7 @@ struct wayland_surface
@@ -11,10 +11,10 @@ index 8dc333b..06886d6 100644
      enum wayland_surface_role role;
      union
 diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
-index 8a458a7..4777420 100644
+index bf13eb6..eacdb26 100644
 --- a/dlls/winewayland.drv/window.c
 +++ b/dlls/winewayland.drv/window.c
-@@ -567,6 +567,7 @@ static void wayland_configure_window(HWND hwnd)
+@@ -566,6 +566,7 @@ static void wayland_configure_window(HWND hwnd)
      BOOL needs_enter_size_move = FALSE;
      BOOL needs_exit_size_move = FALSE;
      BOOL restoring_from_minimize = FALSE;
@@ -22,7 +22,7 @@ index 8a458a7..4777420 100644
      struct wayland_win_data *data;
      RECT rect, surface_rect;
  
-@@ -595,9 +596,25 @@ static void wayland_configure_window(HWND hwnd)
+@@ -594,9 +595,25 @@ static void wayland_configure_window(HWND hwnd)
      memset(&surface->requested, 0, sizeof(surface->requested));
  
      state = surface->processing.state;
@@ -49,7 +49,7 @@ index 8a458a7..4777420 100644
      {
          width = surface->processing.rect.right - surface->processing.rect.left;
          height = surface->processing.rect.bottom - surface->processing.rect.top;
-@@ -606,6 +623,17 @@ static void wayland_configure_window(HWND hwnd)
+@@ -605,6 +622,17 @@ static void wayland_configure_window(HWND hwnd)
      {
          width = height = 0;
      }

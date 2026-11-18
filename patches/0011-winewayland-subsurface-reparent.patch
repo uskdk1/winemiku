@@ -1,5 +1,5 @@
 diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
-index 90fbf10..a5739db 100644
+index e90be0a..d0566eb 100644
 --- a/dlls/winewayland.drv/wayland_surface.c
 +++ b/dlls/winewayland.drv/wayland_surface.c
 @@ -458,6 +458,8 @@ static const struct wp_fractional_scale_v1_listener wp_fractional_scale_listener
@@ -19,17 +19,16 @@ index 90fbf10..a5739db 100644
      surface->wl_surface = wl_compositor_create_surface(process_wayland.wl_compositor);
      if (!surface->wl_surface)
      {
-@@ -657,7 +660,8 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
+@@ -657,7 +660,7 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
                                       struct wayland_surface *owner)
  {
      assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE);
 -    if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd) return;
-+    if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd &&
-+        surface->owner_id == owner->id) return;
++    if (surface->wl_subsurface && surface->owner_id == owner->id) return;
  
      wayland_surface_clear_role(surface);
      surface->role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
-@@ -678,6 +682,7 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
+@@ -678,6 +681,7 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
  
      surface->role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
      surface->owner_hwnd = owner->hwnd;
@@ -37,7 +36,7 @@ index 90fbf10..a5739db 100644
  
      /* Present contents independently of the owner surface. */
      wl_subsurface_set_desync(surface->wl_subsurface);
-@@ -886,6 +891,7 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
+@@ -886,6 +890,7 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
          }
  
          surface->owner_hwnd = NULL;
@@ -45,7 +44,7 @@ index 90fbf10..a5739db 100644
          break;
  
      case WAYLAND_SURFACE_ROLE_LAYER:
-@@ -1202,6 +1208,20 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
+@@ -1202,6 +1207,20 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
      {
          RECT rect = surface->window.rect;
  
@@ -67,7 +66,7 @@ index 90fbf10..a5739db 100644
          rect = map_rect_to_surface(surface, rect);
  
 diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
-index 06886d6..a742386 100644
+index 24d3bf2..2967a42 100644
 --- a/dlls/winewayland.drv/waylanddrv.h
 +++ b/dlls/winewayland.drv/waylanddrv.h
 @@ -284,6 +284,7 @@ struct wayland_shm_buffer
