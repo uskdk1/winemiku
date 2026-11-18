@@ -272,6 +272,24 @@ FL 메인 창이 바 아래 영역(1920×1045)에 맞고, 마우스가 밖으로
 
 ---
 
+## 0015 winewayland-empty-window
+
+**문제**: FL Studio를 켜면 이름 없는 투명창이 생긴다.
+
+**원인**: Delphi 앱은 숨은 `TApplication` 창(크기 0×0, `WS_POPUP | WS_CAPTION`, 나중에 `WS_EX_NOACTIVATE`)을 "보이게" 띄운다.
+Windows에서는 크기가 0이라 안 보이지만, Wine은 이를 xdg_toplevel로 만들고 컴포지터가 크기를 줘서 빈 투명창이 된다
+(0014로 관리 창이 유지되면서 계속 남았다).
+
+**수정** (`dlls/winewayland.drv/window.c`)
+- `wayland_win_data_create_wayland_surface`: 창 크기가 비어 있으면 역할 없음(화면에 안 나옴).
+- `WAYLAND_WindowPosChanged`: 빈 창은 관리 창이 아니다. owner가 화면에 없으면(역할 없음, 예: TApplication이 owner인 Delphi 폼)
+  거기에 subsurface로 붙이지 않고 toplevel로 띄운다 (붙이면 안 보인다).
+- `is_window_managed`: `WS_POPUP | WS_EX_NOACTIVATE` 창은 활성화하며 띄워도 관리 창이 아니다 (0003의 검사를 활성화 검사보다 앞으로).
+
+**확인**: `WAYLAND_DEBUG=client`에서 `set_title("")`인 toplevel은 시작 스플래시 하나뿐이다.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.
