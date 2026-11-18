@@ -213,6 +213,30 @@ surface 주소는 재사용될 수 있어서(실제로 같은 주소로 다시 �
 
 ---
 
+## 0012 borderless-maximized-not-fullscreen
+
+**문제**: FL Studio가 켜자마자 전체화면이 되고(바가 가려짐), 빠져나올 수 없으며 마우스가 창 안에 갇힌다.
+팝업(Welcome, 설정)이 메인 창 뒤에 깔려 알탭으로 골라야 한다.
+
+**원인**: FL 메인 창은 제목줄 없는 팝업(`WS_POPUP | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`)이고 시작할 때 작업 영역 크기로 맞춘다
+(최대화 상태로 뜰 때도, 최대화 표시 없이 크기만 맞출 때도 있다). 그런데 Wine은 첫 최대화 전까지 작업 영역을 모르니(0009)
+모니터 전체를 작업 영역으로 보고, 그래서 FL 창이 모니터 크기가 된다. 이렇게 모니터를 덮는 창을 두고
+winewayland는 제목줄이 있을 때만 최대화로 보고 나머지는 xdg 전체화면으로 보낸다(`wayland_win_data_get_config`).
+win32u도 같은 기준으로 커서를 모니터 안에 가둔다(`clip_fullscreen_window`). 게다가 굵은 테두리가 없으니 min=max=모니터 크기로 고정되어
+컴포지터가 최대화 크기로 줄일 수도 없다.
+
+**수정**
+- `wayland_win_data_get_config` (`dlls/winewayland.drv/window.c`): 모니터를 덮는 창이 `WS_MAXIMIZE`이거나, 제목줄이 없고 `WS_MAXIMIZEBOX`가 있으면
+  전체화면이 아니라 **최대화**로 보낸다. 게임의 전체화면 창(SDL 등)은 최대화 버튼을 켜지 않는다.
+  컴포지터가 최대화 크기를 주면 0009가 작업 영역을 배우고 창을 그 크기로 맞춘다.
+- `WAYLAND_WindowPosChanged`: 최대화 창과, 모니터를 덮는 최대화 버튼 있는 창은 크기 고정(min=max)에서 뺀다.
+- `clip_fullscreen_window` (`dlls/win32u/input.c`): 최대화 창(제목줄 무관)과 제목줄 없이 최대화 버튼이 있는 창은 커서를 가두지 않는다.
+
+**확인**: `WAYLAND_DEBUG=client`에 `set_fullscreen`이 없고 `set_maximized` → `wayland_learn_work_area ... maximized size 1920x1045`.
+FL 메인 창이 바 아래 영역(1920×1045)에 맞고, 마우스가 밖으로 나간다.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.

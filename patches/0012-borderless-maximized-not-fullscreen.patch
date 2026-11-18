@@ -1,0 +1,50 @@
+diff --git a/dlls/win32u/input.c b/dlls/win32u/input.c
+index c24bbab..2134b8f 100644
+--- a/dlls/win32u/input.c
++++ b/dlls/win32u/input.c
+@@ -2814,7 +2814,10 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
+     if (!(style & WS_VISIBLE)) return FALSE;
+     if ((style & (WS_POPUP | WS_CHILD)) == WS_CHILD) return FALSE;
+     /* maximized windows don't count as full screen */
+-    if ((style & WS_MAXIMIZE) && (style & WS_CAPTION) == WS_CAPTION) return FALSE;
++    if (style & WS_MAXIMIZE) return FALSE;
++    /* neither are borderless windows with a maximize box (apps that size themselves
++     * to the work area, which is the whole monitor until the driver learns it) */
++    if ((style & WS_CAPTION) != WS_CAPTION && (style & WS_MAXIMIZEBOX)) return FALSE;
+ 
+     ctx = set_thread_dpi_awareness_context( NTUSER_DPI_PER_MONITOR_AWARE );
+     if (!(ret = get_present_rect( hwnd, &window_rect, get_thread_dpi() )))
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 4777420..8ea517b 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -148,7 +148,14 @@ static void wayland_win_data_get_config(struct wayland_win_data *data,
+     /* The fullscreen state is implied by the window position and style. */
+     if (data->is_fullscreen)
+     {
+-        if ((style & WS_MAXIMIZE) && (style & WS_CAPTION) == WS_CAPTION)
++        /* A maximized window covers the work area, which is the whole monitor
++         * until we learn it from the compositor: keep it maximized even without
++         * a caption (e.g. FL Studio's borderless main window), xdg fullscreen
++         * would hide the bar and lock everything else out. The same goes for a
++         * borderless window with a maximize box that sized itself to the monitor
++         * (FL Studio restoring its maximized size): fullscreen games don't set it. */
++        if ((style & WS_MAXIMIZE) ||
++            ((style & WS_CAPTION) != WS_CAPTION && (style & WS_MAXIMIZEBOX)))
+             window_state |= WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED;
+         /* A resizable window with a caption that merely happens to be as
+          * large as the monitor (e.g. restored from a saved maximized size)
+@@ -483,9 +490,11 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+      * maximized or merely that large, that would pin the xdg min/max size to
+      * the current size, which the compositor then can't maximize or resize
+      * (and some compositors answer every min/max change with a configure,
+-     * which loops). */
++     * which loops). Maximized windows too: they follow the compositor's
++     * maximized size (the work area), not the monitor. */
+     data->resizeable = (swp_flags & WINE_SWP_RESIZABLE) ||
+-                       (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_THICKFRAME);
++                       (NtUserGetWindowLongW(hwnd, GWL_STYLE) & (WS_THICKFRAME | WS_MAXIMIZE)) ||
++                       (fullscreen && (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_MAXIMIZEBOX));
+     data->managed = managed;
+ 
+     if (!surface)
