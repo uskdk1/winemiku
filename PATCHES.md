@@ -334,6 +334,26 @@ z-order에서 그 팝업 바로 아래에 있고 팝업과 겹치거나 16px 안
 
 ---
 
+## 0018 winewayland-app-drag-move
+
+**문제**: FL Studio의 Welcome 창에서 클릭이 다시 안 먹는다. 창이 화면 밖에 있는 것으로 기록되고, 다음 실행 때도 그 자리에 뜬다.
+
+**원인**: FL은 테두리 없는 창이라 윗부분을 끌면 SC_MOVE 없이 마우스를 따라 직접 `SetWindowPos`로 창을 옮긴다.
+Wayland에서는 toplevel이 화면에서 안 움직이는데, 커서의 화면 좌표는 옮겨진 창 위치로 계산된다. 그래서 FL에는 커서가 창과 같이
+움직인 것으로 보이고, FL이 창을 또 옮겨서 Win32 위치가 계속 미끄러진다. 화면 밖으로 나가면 커서 좌표가 가상 화면 가장자리로
+잘려(`screen_xy=-58,1396`) 클릭이 엉뚱한 데 간다. FL은 이 위치를 레지스트리(`Windows\1920x1080x0\FruityLoopsMainForm`의 `Left`·`Top`)에
+저장하고, Welcome 같은 창은 메인 창을 기준으로 띄운다.
+
+**수정** (`dlls/winewayland.drv/window.c`, `WAYLAND_WindowPosChanged`): 왼쪽 버튼을 누른 채(포인터가 그 창 위) 앱이 보이는 toplevel을
+크기는 그대로 두고 옮기면, SC_MOVE처럼 `xdg_toplevel.move`로 컴포지터에 넘긴다. 컴포지터가 잡고 있는 동안에는 진짜 버튼 뗌이 안 오므로
+(`wayland_pointer_release_left_button`, `wayland_pointer.c`) Win32에 왼쪽 버튼 뗌을 보내 앱 쪽 드래그를 끝낸다.
+
+이미 저장된 화면 밖 위치는 패치로 안 고쳐진다. prefix의 FL 레지스트리에서 그 `Left`·`Top`을 지워야 한다.
+
+**확인**: `WINEDEBUG=+waylanddrv`에서 `moved by the app during a button press, starting an interactive move`, 창이 화면에서 따라 움직인다.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.

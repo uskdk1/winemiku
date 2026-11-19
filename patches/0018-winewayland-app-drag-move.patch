@@ -1,0 +1,106 @@
+diff --git a/dlls/winewayland.drv/wayland_pointer.c b/dlls/winewayland.drv/wayland_pointer.c
+index 6a85767..0de32e9 100644
+--- a/dlls/winewayland.drv/wayland_pointer.c
++++ b/dlls/winewayland.drv/wayland_pointer.c
+@@ -316,6 +316,25 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
+     NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+ }
+ 
++/***********************************************************************
++ *           wayland_pointer_release_left_button
++ *
++ * Release the left button for Win32 after handing its press to an interactive
++ * move: the compositor's grab keeps the real release from us.
++ */
++void wayland_pointer_release_left_button(HWND hwnd, uint32_t button_serial)
++{
++    struct wayland_pointer *pointer = &process_wayland.pointer;
++    INPUT input = {.type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_LEFTUP};
++
++    pthread_mutex_lock(&pointer->mutex);
++    if (pointer->button_serial == button_serial) pointer->button_serial = 0;
++    pthread_mutex_unlock(&pointer->mutex);
++
++    NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
++    wl_display_flush(process_wayland.wl_display);
++}
++
+ static void pointer_handle_axis(void *data, struct wl_pointer *wl_pointer,
+                                 uint32_t time, uint32_t axis, wl_fixed_t value)
+ {
+diff --git a/dlls/winewayland.drv/waylanddrv.h b/dlls/winewayland.drv/waylanddrv.h
+index cc0da78..86ffa2f 100644
+--- a/dlls/winewayland.drv/waylanddrv.h
++++ b/dlls/winewayland.drv/waylanddrv.h
+@@ -448,6 +448,7 @@ void activate_keyboard_hkl(HWND hwnd, BOOL ime);
+ void wayland_pointer_init(struct wl_pointer *wl_pointer);
+ void wayland_pointer_deinit(void);
+ void wayland_pointer_clear_constraint(void);
++void wayland_pointer_release_left_button(HWND hwnd, uint32_t button_serial);
+ 
+ /**********************************************************************
+  *          Wayland text input
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 78c84c7..0bd1ac5 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -525,10 +525,21 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+     HWND owner = NtUserGetAncestor(hwnd, GA_ROOT), popup_owner;
+     struct wayland_surface *owner_surface;
+     struct wayland_win_data *data, *owner_data;
+-    BOOL managed, fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
++    BOOL managed, fullscreen = swp_flags & WINE_SWP_FULLSCREEN, dragged = FALSE;
++    uint32_t button_serial = 0;
+ 
+     TRACE("hwnd %p new_rects %s after %p flags %08x\n", hwnd, debugstr_window_rects(new_rects), insert_after, swp_flags);
+ 
++    /* An app moving its window while the left button is held on it is dragging
++     * it itself (borderless apps like FL Studio, without SC_MOVE): see below. */
++    if (!(swp_flags & SWP_NOMOVE) && (NtUserGetAsyncKeyState(VK_LBUTTON) & 0x8000))
++    {
++        pthread_mutex_lock(&process_wayland.pointer.mutex);
++        if (process_wayland.pointer.focused_hwnd == hwnd)
++            button_serial = process_wayland.pointer.button_serial;
++        pthread_mutex_unlock(&process_wayland.pointer.mutex);
++    }
++
+     /* Get the managed state with win_data unlocked, as is_window_managed
+      * may need to query win_data information about other HWNDs and thus
+      * acquire the lock itself internally. */
+@@ -560,6 +571,27 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+         owner_surface = owner_data ? owner_data->wayland_surface : NULL;
+     }
+ 
++    /* The window doesn't move on screen (the compositor places toplevels), so the
++     * cursor, mapped through the new window position, seems to have moved with
++     * it, and the app moves the window again: it runs away off screen, where
++     * clicks no longer reach it. Hand the drag to the compositor, as for SC_MOVE,
++     * and release the button so that the app ends its own drag. */
++    if (button_serial && data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface) &&
++        (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE) &&
++        new_rects->window.right - new_rects->window.left == data->rects.window.right - data->rects.window.left &&
++        new_rects->window.bottom - new_rects->window.top == data->rects.window.bottom - data->rects.window.top &&
++        (new_rects->window.left != data->rects.window.left || new_rects->window.top != data->rects.window.top))
++    {
++        pthread_mutex_lock(&process_wayland.seat.mutex);
++        if (process_wayland.seat.wl_seat)
++        {
++            TRACE("hwnd=%p moved by the app during a button press, starting an interactive move\n", hwnd);
++            xdg_toplevel_move(data->wayland_surface->xdg_toplevel, process_wayland.seat.wl_seat, button_serial);
++            dragged = TRUE;
++        }
++        pthread_mutex_unlock(&process_wayland.seat.mutex);
++    }
++
+     data->rects = *new_rects;
+     data->is_fullscreen = fullscreen;
+     /* Not WINE_SWP_RESIZABLE (a sizing border, unless the window covers its
+@@ -590,6 +622,8 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+ 
+     if (owner_data) wayland_win_data_release(owner_data);
+     wayland_win_data_release(data);
++
++    if (dragged) wayland_pointer_release_left_button(hwnd, button_serial);
+ }
+ 
+ /**********************************************************************
