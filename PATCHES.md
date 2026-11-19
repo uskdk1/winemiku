@@ -354,6 +354,23 @@ Wayland에서는 toplevel이 화면에서 안 움직이는데, 커서의 화면 
 
 ---
 
+## 0019 winewayland-popup-active-owner
+
+**문제**: FL Studio Settings의 드롭다운 목록이 메인 창에 붙어서 뜨거나 아예 안 뜬다.
+
+**원인**: 드롭다운 목록(비관리 `WS_POPUP`)의 Win32 owner가 Settings가 아니라 메인 창이다. winewayland는 비관리 팝업을 owner의 subsurface로 붙이므로
+목록이 메인 창 기준 위치에 그려지고, Settings가 메인 창을 덮고 있으면 그 밑에 깔린다. Windows에서는 화면 좌표대로 Settings 위에 그려진다.
+FL은 목록을 먼저 (230,220)에 보이게 띄운 다음 Settings 안으로 옮긴다.
+
+**수정** (`dlls/winewayland.drv/window.c`, `WAYLAND_WindowPosChanged`): 비관리 팝업이 그 스레드의 활성 창과 겹치거나 16px 안으로 닿으면
+owner 대신 활성 창의 subsurface로 붙인다 (매번 다시 판정하므로 옮겨진 순간 Settings로 다시 붙는다). Wayland에서 toplevel 위치는 실제 화면 위치가
+아니어서, 다른 창들의 위치보다 방금 클릭한 활성 창을 더 믿는다. 아니면 전처럼 owner, owner가 화면에 없으면 0017의 `find_popup_owner`.
+owner가 곧 활성 창인 팝업(카카오톡 우클릭 메뉴 등)은 달라지지 않는다.
+
+**확인**: `WINEDEBUG=+waylanddrv`에서 드롭다운 hwnd가 `attaching the popup to <Settings hwnd>`.
+
+---
+
 ## dxvk 0001 d3d11-auto-generate-mips
 
 **문제**: 카카오톡 광고 이미지(1200×600을 약 120×60으로)가 자글자글하다.

@@ -1,0 +1,80 @@
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 0bd1ac5..4509295 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -411,15 +411,26 @@ static BOOL has_owned_popups(HWND hwnd)
+  * nothing). win32u's owner hint only looks at the point just outside the
+  * popup's top left corner.
+  */
+-static HWND find_popup_owner(HWND hwnd, const RECT *rect)
++static BOOL is_popup_near_toplevel(HWND toplevel, const RECT *rect)
+ {
+     struct wayland_win_data *data;
+     RECT near = *rect, tmp;
++    BOOL ret;
++
++    InflateRect(&near, POPUP_OWNER_SLACK, POPUP_OWNER_SLACK);
++    if (!(data = wayland_win_data_get(toplevel))) return FALSE;
++    ret = data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface) &&
++          intersect_rect(&tmp, &data->rects.window, &near);
++    wayland_win_data_release(data);
++    return ret;
++}
++
++static HWND find_popup_owner(HWND hwnd, const RECT *rect)
++{
+     HWND *list, ret = 0;
+     BOOL below = FALSE;
+     UINT i;
+ 
+-    InflateRect(&near, POPUP_OWNER_SLACK, POPUP_OWNER_SLACK);
+     if (!(list = build_hwnd_list())) return 0;
+ 
+     for (i = 0; list[i] != HWND_BOTTOM && !ret; i++)
+@@ -429,11 +440,7 @@ static HWND find_popup_owner(HWND hwnd, const RECT *rect)
+             below = TRUE;
+             continue;
+         }
+-        if (!below || !(data = wayland_win_data_get(list[i]))) continue;
+-        if (data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface) &&
+-            intersect_rect(&tmp, &data->rects.window, &near))
+-            ret = list[i];
+-        wayland_win_data_release(data);
++        if (below && is_popup_near_toplevel(list[i], rect)) ret = list[i];
+     }
+ 
+     free(list);
+@@ -558,12 +565,27 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+     /* an owner that isn't on screen (no role, e.g. the empty TApplication window
+      * owning Delphi's forms) can't carry a subsurface: show it as a toplevel */
+     if (owner_surface && !owner_surface->role) owner_surface = NULL;
+-    /* An unmanaged popup without an owner on screen would become a toplevel,
+-     * which the compositor places anywhere and gives the keyboard focus to:
+-     * attach it to the window it is shown over or next to instead. */
+-    if (!owner_surface && !managed && surface &&
+-        (NtUserGetWindowLongW(hwnd, GWL_STYLE) & (WS_POPUP | WS_VISIBLE)) == (WS_POPUP | WS_VISIBLE) &&
+-        (popup_owner = find_popup_owner(hwnd, &new_rects->window)))
++    /* An unmanaged popup belongs on screen to the window it's shown over, which
++     * isn't always its owner: FL Studio's dropdown lists in the Settings window
++     * are owned by the main window, and would show over it, or below Settings.
++     * Prefer the active window when the popup is over it (toplevel positions
++     * are made up on Wayland, so other windows' rects can't be trusted as much).
++     * Without an owner on screen it would become a toplevel, which the
++     * compositor places anywhere and gives the keyboard focus to: attach it to
++     * the window it is shown over or next to instead. */
++    popup_owner = 0;
++    if (!managed && surface &&
++        (NtUserGetWindowLongW(hwnd, GWL_STYLE) & (WS_POPUP | WS_VISIBLE)) == (WS_POPUP | WS_VISIBLE))
++    {
++        HWND active = get_active_window();
++
++        if (active && active != hwnd && active != owner &&
++            is_popup_near_toplevel(active, &new_rects->window))
++            popup_owner = active;
++        else if (!owner_surface)
++            popup_owner = find_popup_owner(hwnd, &new_rects->window);
++    }
++    if (popup_owner)
+     {
+         TRACE("hwnd=%p attaching the popup to %p\n", hwnd, popup_owner);
+         if (owner_data) wayland_win_data_release(owner_data);
